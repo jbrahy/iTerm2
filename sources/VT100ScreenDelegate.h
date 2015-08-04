@@ -15,7 +15,7 @@
 - (void)screenNeedsRedraw;
 
 // Update window title, tab colors, and redraw view.
-- (void)screenUpdateDisplay;
+- (void)screenUpdateDisplay:(BOOL)redraw;
 
 // Called when the screen's size changes.
 - (void)screenSizeDidChange;
@@ -231,5 +231,7 @@
 - (void)screenSetBackgroundImageFile:(NSString *)filename;
 - (void)screenSetBadgeFormat:(NSString *)theFormat;
 - (void)screenSetUserVar:(NSString *)kvp;
+
+- (BOOL)screenShouldReduceFlicker;
 
 @end

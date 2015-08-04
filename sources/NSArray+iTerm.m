@@ -28,7 +28,9 @@
     NSMutableAttributedString *result = [[[NSMutableAttributedString alloc] init] autorelease];
     for (NSAttributedString *element in self) {
         [result appendAttributedString:element];
-        [result appendAttributedString:joiner];
+        if (element != self.lastObject) {
+            [result appendAttributedString:joiner];
+        }
     }
     return result;
 }
@@ -39,6 +41,23 @@
         [temp addObject:block(anObject)];
     }
     return temp;
+}
+
+@end
+
+@implementation NSMutableArray (iTerm)
+
+- (void)reverse {
+    if ([self count] == 0) {
+        return;
+    }
+    NSUInteger i = 0;
+    NSUInteger j = [self count] - 1;
+    while (i < j) {
+        [self exchangeObjectAtIndex:i withObjectAtIndex:j];
+        i++;
+        j--;
+    }
 }
 
 @end

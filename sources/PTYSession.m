@@ -24,6 +24,7 @@
 #import "iTermProfilePreferences.h"
 #import "iTermRestorableSession.h"
 #import "iTermRule.h"
+#import "iTermSavePanel.h"
 #import "iTermSelection.h"
 #import "iTermSemanticHistoryController.h"
 #import "iTermTextExtractor.h"
@@ -84,8 +85,6 @@ static NSString *const kReopenSessionWarningIdentifier = @"ReopenSessionAfterBro
 
 static NSString *const kShellIntegrationOutOfDateAnnouncementIdentifier =
     @"kShellIntegrationOutOfDateAnnouncementIdentifier";
-static NSString *const kAccessibilitySlownessAnnouncementIdentifier =
-    @"kAccessibilitySlownessAnnouncementIdentifier";
 
 static NSString *TERM_ENVNAME = @"TERM";
 static NSString *COLORFGBG_ENVNAME = @"COLORFGBG";
@@ -339,6 +338,8 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
 
     // Synthetic sessions are used for "zoom in" and DVR, and their closing cannot be undone.
     BOOL _synthetic;
+
+    NSMutableArray *_commandUses;
 }
 
 + (void)registerSessionInArrangement:(NSDictionary *)arrangement {
@@ -400,6 +401,7 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         _hosts = [[NSMutableArray alloc] init];
         // Allocate a guid. If we end up restoring from a session during startup this will be replaced.
         _guid = [[NSString uuid] retain];
+        _commandUses = [[NSMutableArray alloc] init];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(windowResized)
                                                      name:@"iTermWindowDidResize"
@@ -483,6 +485,7 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     [_guid release];
     [_lastCommand release];
     [_substitutions release];
+    [_commandUses release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 
     if (_dvrDecoder) {
@@ -727,11 +730,11 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     }
 
 
-    NSNumber *n = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_PANE];
+    NSNumber *tmuxPaneNumber = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_PANE];
     BOOL shouldEnterTmuxMode = NO;
     BOOL didRestoreContents = NO;
     BOOL attachedToServer = NO;
-    if (!n) {
+    if (!tmuxPaneNumber) {
         DLog(@"No tmux pane ID during session restoration");
         // |contents| will be non-nil when using system window restoration.
         NSDictionary *contents = arrangement[SESSION_ARRANGEMENT_CONTENTS];
@@ -771,6 +774,20 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
             NSString *oldCWD = arrangement[SESSION_ARRANGEMENT_WORKING_DIRECTORY];
             DLog(@"Running command...");
             if (haveSavedProgramData) {
+                if (oldCWD) {
+                    // Replace PWD with the working directory at the time the arrangement was saved
+                    // so it will be properly restored.
+                    NSMutableDictionary *temp = [[aSession.environment mutableCopy] autorelease];
+                    temp[PWD_ENVNAME] = oldCWD;
+                    aSession.environment = temp;
+
+                    if ([aSession.program isEqualToString:[ITAddressBookMgr standardLoginCommand]]) {
+                        // Create a login session that drops you in the old directory instead of
+                        // using login -fp "$USER". This lets saved arrangements properly restore
+                        // the working directory when the profile specifies the home directory.
+                        aSession.program = [ITAddressBookMgr shellLauncherCommand];
+                    }
+                }
                 [aSession startProgram:aSession.program
                            environment:aSession.environment
                                 isUTF8:aSession.isUTF8
@@ -816,10 +833,15 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
             didRestoreContents = YES;
         }
     } else {
+        // Is a tmux pane
         NSString *title = [state objectForKey:@"title"];
         if (title) {
             [aSession setName:title];
             [aSession setWindowTitle:title];
+        }
+        if ([aSession.profile[KEY_AUTOLOG] boolValue]) {
+            [aSession.shell startLoggingToFileWithPath:[aSession _autoLogFilenameForTermId:aSession.sessionId]
+                                          shouldAppend:NO];
         }
     }
     if (needDivorce) {
@@ -827,8 +849,8 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         [aSession sessionProfileDidChange];
     }
 
-    if (n) {
-        [aSession setTmuxPane:[n intValue]];
+    if (tmuxPaneNumber) {
+        [aSession setTmuxPane:[tmuxPaneNumber intValue]];
     }
     NSArray *history = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_HISTORY];
     if (history) {
@@ -934,6 +956,11 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         [aSession startTmuxMode];
         [aSession.tmuxController sessionChangedTo:arrangement[SESSION_ARRANGEMENT_TMUX_GATEWAY_SESSION_NAME]
                                         sessionId:[arrangement[SESSION_ARRANGEMENT_TMUX_GATEWAY_SESSION_ID] intValue]];
+    }
+
+    VT100RemoteHost *lastRemoteHost = aSession.screen.lastRemoteHost;
+    if (lastRemoteHost) {
+        [aSession screenCurrentHostDidChange:lastRemoteHost];
     }
     return aSession;
 }
@@ -1243,6 +1270,13 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     return ![iTermAdvancedSettingsModel doNotSetCtype];
 }
 
+- (NSString *)sessionId {
+    return [NSString stringWithFormat:@"w%dt%dp%lu",
+            [[_tab realParentWindow] number],
+            _tab.tabNumberForItermSessionId,
+            (unsigned long)_tab.sessions.count];
+}
+
 - (void)startProgram:(NSString *)command
          environment:(NSDictionary *)environment
               isUTF8:(BOOL)isUTF8
@@ -1296,17 +1330,14 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         env[PWD_ENVNAME] = [PWD_ENVVALUE stringByExpandingTildeInPath];
     }
 
-    NSWindowController<iTermWindowController> *pty = [_tab realParentWindow];
-    NSString *itermId = [NSString stringWithFormat:@"w%dt%dp%lu",
-                         [pty number],
-                         _tab.tabNumberForItermSessionId,
-                         (unsigned long)_tab.sessions.count];
+    NSString *itermId = [self sessionId];
     env[@"ITERM_SESSION_ID"] = itermId;
     if (_profile[KEY_NAME]) {
         env[@"ITERM_PROFILE"] = [_profile[KEY_NAME] stringByPerformingSubstitutions:substitutions];
     }
     if ([_profile[KEY_AUTOLOG] boolValue]) {
-        [_shell loggingStartWithPath:[self _autoLogFilenameForTermId:itermId]];
+        [_shell startLoggingToFileWithPath:[self _autoLogFilenameForTermId:itermId]
+                              shouldAppend:NO];
     }
     @synchronized(self) {
       _registered = YES;
@@ -1412,6 +1443,8 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
 }
 
 - (void)terminate {
+    DLog(@"terminate called from %@", [NSThread callStackSymbols]);
+
     if ([[self textview] isFindingCursor]) {
         [[self textview] endFindCursor];
     }
@@ -1524,9 +1557,6 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     [_textview setDataSource:nil];
     [_textview setDelegate:nil];
     [_textview removeFromSuperview];
-    // Free refs to VT100ScreenMarks for this session in CommandUse objects.
-    [[NSNotificationCenter defaultCenter] postNotificationName:kCommandUseReleaseMarksInSession
-                                                        object:self.guid];
     _textview = nil;
 }
 
@@ -1784,15 +1814,9 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     long long startAbsLineNumber;
     iTermStringLine *stringLine = [_screen stringLineAsStringAtAbsoluteLineNumber:_triggerLineNumber
                                                                          startPtr:&startAbsLineNumber];
-    for (Trigger *trigger in _triggers) {
-        BOOL stop = [trigger tryString:stringLine
-                             inSession:self
-                           partialLine:NO
-                            lineNumber:startAbsLineNumber];
-        if (stop) {
-            break;
-        }
-    }
+    [self checkTriggersOnPartialLine:NO
+                          stringLine:stringLine
+                          lineNumber:startAbsLineNumber];
 }
 
 - (void)checkPartialLineTriggers {
@@ -1807,10 +1831,18 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     long long startAbsLineNumber;
     iTermStringLine *stringLine = [_screen stringLineAsStringAtAbsoluteLineNumber:_triggerLineNumber
                                                                          startPtr:&startAbsLineNumber];
+    [self checkTriggersOnPartialLine:YES
+                          stringLine:stringLine
+                          lineNumber:startAbsLineNumber];
+}
+
+- (void)checkTriggersOnPartialLine:(BOOL)partial
+                        stringLine:(iTermStringLine *)stringLine
+                                  lineNumber:(long long)startAbsLineNumber {
     for (Trigger *trigger in _triggers) {
         BOOL stop = [trigger tryString:stringLine
                              inSession:self
-                           partialLine:YES
+                           partialLine:partial
                             lineNumber:startAbsLineNumber];
         if (stop) {
             break;
@@ -1821,6 +1853,14 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
 - (void)appendStringToTriggerLine:(NSString *)s {
     if (_triggerLineNumber == -1) {
         _triggerLineNumber = _screen.numberOfScrollbackLines + _screen.cursorY - 1 + _screen.totalScrollbackOverflow;
+    }
+
+    // We used to build up the string so you could write triggers that included bells. That doesn't
+    // really make sense, especially in the new model, but it's so useful to be able to customize
+    // the bell that I'll add this special case.
+    if ([s isEqualToString:@"\a"]) {
+        iTermStringLine *stringLine = [iTermStringLine stringLineWithString:s];
+        [self checkTriggersOnPartialLine:YES stringLine:stringLine lineNumber:_triggerLineNumber];
     }
 }
 
@@ -3049,28 +3089,23 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     return [_shell logging];
 }
 
-- (void)logStart
-{
-    NSSavePanel *panel;
-    int sts;
-
-    panel = [NSSavePanel savePanel];
-    // Session could end before panel is dismissed.
-    [[self retain] autorelease];
-    panel.directoryURL = [NSURL fileURLWithPath:NSHomeDirectory()];
-    panel.nameFieldStringValue = @"";
-    sts = [panel runModal];
-    if (sts == NSOKButton) {
-        BOOL logsts = [_shell loggingStartWithPath:panel.URL.path];
-        if (logsts == NO) {
+- (void)logStart {
+    iTermSavePanel *savePanel = [iTermSavePanel showWithOptions:kSavePanelOptionAppendOrReplace
+                                                     identifier:@"StartSessionLog"
+                                               initialDirectory:NSHomeDirectory()
+                                                defaultFilename:@""];
+    if (savePanel.path) {
+        BOOL shouldAppend = (savePanel.replaceOrAppend == kSavePanelReplaceOrAppendSelectionAppend);
+        BOOL ok = [_shell startLoggingToFileWithPath:savePanel.path
+                                        shouldAppend:shouldAppend];
+        if (!ok) {
             NSBeep();
         }
     }
 }
 
-- (void)logStop
-{
-    [_shell loggingStop];
+- (void)logStop {
+    [_shell stopLogging];
 }
 
 - (void)clearBuffer {
@@ -3098,17 +3133,16 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     return NO;
 }
 
-- (void)setProfile:(NSDictionary*)entry
-{
-    assert(entry);
-    DLog(@"Set address book entry to one with guid %@", entry[KEY_GUID]);
-    NSMutableDictionary *dict = [[entry mutableCopy] autorelease];
+- (void)setProfile:(Profile *)newProfile {
+    assert(newProfile);
+    DLog(@"Set profile to one with guid %@", newProfile[KEY_GUID]);
+    NSMutableDictionary *mutableProfile = [[newProfile mutableCopy] autorelease];
     // This is the most practical way to migrate the bopy of a
     // profile that's stored in a saved window arrangement. It doesn't get
     // saved back into the arrangement, unfortunately.
-    [ProfileModel migratePromptOnCloseInMutableBookmark:dict];
+    [ProfileModel migratePromptOnCloseInMutableBookmark:mutableProfile];
 
-    NSString *originalGuid = [entry objectForKey:KEY_ORIGINAL_GUID];
+    NSString *originalGuid = newProfile[KEY_ORIGINAL_GUID];
     if (originalGuid) {
         // This code path is taken when changing an existing session's profile.
         // See bug 2632.
@@ -3120,11 +3154,12 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     }
     if (!_originalProfile) {
         // This is normally taken when a new session is being created.
-        _originalProfile = [NSDictionary dictionaryWithDictionary:dict];
+        _originalProfile = [NSDictionary dictionaryWithDictionary:mutableProfile];
         [_originalProfile retain];
     }
+
     [_profile release];
-    _profile = [dict retain];
+    _profile = [mutableProfile retain];
     [[_tab realParentWindow] invalidateRestorableState];
     [[[self tab] realParentWindow] updateTabColors];
 }
@@ -3344,8 +3379,7 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     }
 }
 
-- (void)scheduleUpdateIn:(NSTimeInterval)timeout
-{
+- (void)scheduleUpdateIn:(NSTimeInterval)timeout {
     if (_exited) {
         return;
     }
@@ -3373,11 +3407,23 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     _timeOfLastScheduling = now;
     _lastTimeout = timeout;
 
+#if 0
+    // TODO: Try this. It solves the bug where we don't redraw properly during live resize.
+    // I'm worried about the possible side effects it might have since there's no way to 
+    // know all the tracking event loops.
+    _updateTimer = [[NSTimer timerWithTimeInterval:MAX(0, timeout - timeSinceLastUpdate)
+                                            target:self
+                                          selector:@selector(updateDisplay)
+                                          userInfo:[NSNumber numberWithFloat:(float)timeout]
+                                           repeats:NO] retain];
+    [[NSRunLoop currentRunLoop] addTimer:_updateTimer forMode:NSRunLoopCommonModes];
+#else
     _updateTimer = [[NSTimer scheduledTimerWithTimeInterval:MAX(0, timeout - timeSinceLastUpdate)
                                                      target:self
                                                    selector:@selector(updateDisplay)
                                                    userInfo:[NSNumber numberWithFloat:(float)timeout]
                                                     repeats:NO] retain];
+#endif
 }
 
 - (void)doAntiIdle {
@@ -3738,9 +3784,8 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
                withOffset:offset];
 }
 
-- (NSString*)unpaddedSelectedText
-{
-    return [_textview selectedTextWithPad:NO];
+- (NSString*)unpaddedSelectedText {
+    return [_textview selectedText];
 }
 
 - (void)copySelection {
@@ -5451,34 +5496,8 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     return _liveSession && !_dvr;
 }
 
-- (void)textViewWarnThatAccessibilityIsCausingSlowness {
-    static NSString *const kSilenceKey = @"NoSyncSlowAccessibilityWarning";
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kSilenceKey]) {
-        return;
-    }
-    iTermAnnouncementViewController *announcement =
-        [iTermAnnouncementViewController announcementWithTitle:@"Accessibilty is making iTerm2 slow! "
-                                                               @"Reduce the number of lines of scrollback to "
-                                                               @"under 1000 to mitigate the damage."
-                                                         style:kiTermAnnouncementViewStyleWarning
-                                                   withActions:@[ @"OK", @"Don't warn me again" ]
-                                                    completion:^(int selection) {
-                switch (selection) {
-                    case -2:  // Dismiss programmatically
-                        break;
-
-                    case -1: // Cancel button
-                        break;
-
-                    case 0: // OK
-                        break;
-
-                    case 1: // Don't warn again
-                        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kSilenceKey];
-                        break;
-                }
-            }];
-    [self queueAnnouncement:announcement identifier:kAccessibilitySlownessAnnouncementIdentifier];
+- (BOOL)textViewShouldShowMarkIndicators {
+    return [iTermProfilePreferences boolForKey:KEY_SHOW_MARK_INDICATORS inProfile:_profile];
 }
 
 - (void)sendEscapeSequence:(NSString *)text
@@ -5739,8 +5758,11 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     [_textview setNeedsDisplay:YES];
 }
 
-- (void)screenUpdateDisplay {
+- (void)screenUpdateDisplay:(BOOL)redraw {
     [self updateDisplay];
+    if (redraw) {
+        [_textview setNeedsDisplay:YES];
+    }
 }
 
 - (void)screenSizeDidChange {
@@ -6289,7 +6311,7 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
 }
 
 - (void)screenSetBadgeFormat:(NSString *)theFormat {
-    theFormat = [theFormat stringByBase64DecodingStringWithEncoding:NSUTF8StringEncoding];
+    theFormat = [theFormat stringByBase64DecodingStringWithEncoding:self.encoding];
     [self setSessionSpecificProfileValues:@{ KEY_BADGE_FORMAT: theFormat }];
     _textview.badgeLabel = [self badgeLabel];
 }
@@ -6390,6 +6412,10 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         [_variables removeObjectForKey:kVariableKeySessionUsername];
     }
     [self dismissAnnouncementWithIdentifier:kShellIntegrationOutOfDateAnnouncementIdentifier];
+
+    [_commandUses autorelease];
+    _commandUses = [[[CommandHistory sharedInstance] commandUsesForHost:host] retain];
+
     [[[self tab] realParentWindow] sessionHostDidChange:self to:host];
 
     int line = [_screen numberOfScrollbackLines] + _screen.cursorY;
@@ -6410,15 +6436,17 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
         }
     }
 
-    // First, try to match any rule with the hostname
+    // Find the best-matching rule.
     int bestScore = 0;
+    int longestHost = 0;
     Profile *bestProfile = nil;
 
     for (NSString *ruleString in stringToProfile) {
         iTermRule *rule = [iTermRule ruleWithString:ruleString];
         int score = [rule scoreForHostname:hostname username:username path:path];
-        if (score > bestScore) {
+        if ((score > bestScore) || (score > 0 && score == bestScore && [rule.hostname length] > longestHost)) {
             bestScore = score;
+            longestHost = [rule.hostname length];
             bestProfile = stringToProfile[ruleString];
         }
     }
@@ -6463,11 +6491,13 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     }
     iTermTextExtractor *extractor = [iTermTextExtractor textExtractorWithDataSource:_screen];
     NSString *command = [extractor contentInRange:VT100GridWindowedRangeMake(range, 0, 0)
+                                attributeProvider:nil
                                        nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
                                               pad:NO
                                includeLastNewline:NO
                            trimTrailingWhitespace:NO
-                                     cappedAtSize:-1];
+                                     cappedAtSize:-1
+                                continuationChars:nil];
     NSRange newline = [command rangeOfString:@"\n"];
     if (newline.location != NSNotFound) {
         command = [command substringToIndex:newline.location];
@@ -6494,9 +6524,10 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
     VT100RemoteHost *host = [_screen remoteHostOnLine:[_screen numberOfLines]];
     NSString *trimmedCommand =
         [command stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    return [[CommandHistory sharedInstance] autocompleteSuggestionsWithPartialCommand:trimmedCommand
-                                                                               onHost:host];
+    return [[CommandHistory sharedInstance] commandHistoryEntriesWithPrefix:trimmedCommand
+                                                                     onHost:host];
 }
+
 - (void)screenCommandDidChangeWithRange:(VT100GridCoordRange)range {
     DLog(@"FinalTerm: command changed. New range is %@", VT100GridCoordRangeDescription(range));
     _shellIntegrationEverUsed = YES;
@@ -6775,6 +6806,10 @@ static NSTimeInterval kMinimumPartialLineTriggerCheckInterval = 0.5;
                 }
             }];
     [self queueAnnouncement:announcement identifier:kShellIntegrationOutOfDateAnnouncementIdentifier];
+}
+
+- (BOOL)screenShouldReduceFlicker {
+    return [iTermProfilePreferences boolForKey:KEY_REDUCE_FLICKER inProfile:self.profile];
 }
 
 #pragma mark - Announcements

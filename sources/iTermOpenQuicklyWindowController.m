@@ -11,6 +11,7 @@
 #import "NSTextField+iTerm.h"
 #import "PseudoTerminal.h"
 #import "PTYTab.h"
+#import "SolidColorView.h"
 #import "VT100RemoteHost.h"
 
 @interface iTermOpenQuicklyWindowController () <
@@ -141,8 +142,8 @@
 
     frame.size.height = contentSize.height;
 
-    frame.origin.x = floor((screen.frame.size.width - frame.size.width) / 2);
-    frame.origin.y = screen.frame.origin.y + screen.frame.size.height - kMarginAboveWindow - frame.size.height;
+    frame.origin.x = NSMinX(screen.frame) + floor((screen.frame.size.width - frame.size.width) / 2);
+    frame.origin.y = NSMaxY(screen.frame) - kMarginAboveWindow - frame.size.height;
     return frame;
 }
 
@@ -174,6 +175,8 @@
                                makeKey:YES
                                command:nil
                                  block:nil];
+        } else if ([object isKindOfClass:[NSString class]]) {
+            [[iTermController sharedInstance] loadWindowArrangementWithName:object];
         }
     }
 

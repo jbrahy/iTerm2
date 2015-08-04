@@ -251,7 +251,7 @@ static NSTimeInterval kHighlightAnimationDuration = 0.5;
         // TODO: This image is missing!
         NSImage *piImage = [[NSImage alloc] initByReferencingFile:[[PSMTabBarControl bundle] pathForImageResource:@"pi"]];
         [returnImage lockFocus];
-        NSPoint indicatorPoint = NSMakePoint([self frame].size.width - MARGIN_X - kPSMTabBarIndicatorWidth, MARGIN_Y);
+        NSPoint indicatorPoint = NSMakePoint([self frame].size.width - kSPMTabBarCellInternalXMargin - kPSMTabBarIndicatorWidth, kSPMTabBarCellInternalYMargin);
         [piImage drawAtPoint:indicatorPoint
                     fromRect:NSZeroRect
                    operation:NSCompositeSourceOver
@@ -414,11 +414,10 @@ static NSTimeInterval kHighlightAnimationDuration = 0.5;
     [super setHighlighted:highlighted];
     if (highlighted != wasHighlighted) {
         _highlightChangeTime = [NSDate timeIntervalSinceReferenceDate];
-        [self.controlView retain];
         [NSTimer scheduledTimerWithTimeInterval:1 / 60.0
                                          target:self
                                        selector:@selector(redrawHighlight:)
-                                       userInfo:nil
+                                       userInfo:self.controlView
                                         repeats:YES];
     }
 }
@@ -426,7 +425,6 @@ static NSTimeInterval kHighlightAnimationDuration = 0.5;
 - (void)redrawHighlight:(NSTimer *)timer {
     [self.controlView setNeedsDisplayInRect:self.frame];
     if ([NSDate timeIntervalSinceReferenceDate] - _highlightChangeTime > kHighlightAnimationDuration) {
-        [self.controlView release];
         [timer invalidate];
     }
 }

@@ -8,6 +8,7 @@
 #import "iTermGrowlDelegate.h"
 #import "iTermPreferences.h"
 #import "iTermProfilePreferences.h"
+#import "NSColor+iTerm.h"
 #import "NSView+iTerm.h"
 #import "NSWindow+PSM.h"
 #import "PreferencePanel.h"
@@ -17,6 +18,7 @@
 #import "PTYScrollView.h"
 #import "PTYSession.h"
 #import "SessionView.h"
+#import "SolidColorView.h"
 #import "TmuxDashboardController.h"
 #import "TmuxLayoutParser.h"
 #import "WindowControllerInterface.h"
@@ -141,7 +143,7 @@ static NSString* TAB_ARRANGEMENT_IS_ACTIVE = @"Is Active";
 static NSString* TAB_ARRANGEMENT_ID = @"ID";  // only for maximize/unmaximize
 static NSString* TAB_ARRANGEMENT_IS_MAXIMIZED = @"Maximized";
 static NSString* TAB_ARRANGEMENT_TMUX_WINDOW_PANE = @"tmux window pane";
-static NSString* TAB_ARRANGEMENT_COLOR = @"Tab color";
+static NSString* TAB_ARRANGEMENT_COLOR = @"Tab color";  // DEPRECATED - Each PTYSession has its own tab color now
 
 static const BOOL USE_THIN_SPLITTERS = YES;
 
@@ -216,8 +218,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
 }
 
 // init/dealloc
-- (id)initWithSession:(PTYSession*)session
-{
+- (id)initWithSession:(PTYSession*)session {
     self = [super init];
     PtyLog(@"PTYTab initWithSession %p", self);
     if (self) {
@@ -2183,9 +2184,9 @@ static NSString* FormatRect(NSRect r) {
         NSArray* subArrangements = [arrangement objectForKey:SUBVIEWS];
         PTYSession* active = nil;
         iTermObjectType subObjectType = objectType;
-        for (int i = 0; i < [subArrangements count]; ++i) {
-            NSDictionary* subArrangement = [subArrangements objectAtIndex:i];
-            PTYSession* session = [self _recursiveRestoreSessions:subArrangement
+        for (int i = 0; i < [subArrangements count] && i < splitter.subviews.count; ++i) {
+            NSDictionary *subArrangement = subArrangements[i];
+            PTYSession *session = [self _recursiveRestoreSessions:subArrangement
                                                            atNode:[[splitter subviews] objectAtIndex:i]
                                                             inTab:theTab
                                                     forObjectType:subObjectType];
@@ -2361,11 +2362,8 @@ static NSString* FormatRect(NSRect r) {
 
 // This can only be used in conjunction with
 // +[tabWithArrangement:inTerminal:hasFlexibleView:viewMap:].
- - (void)addToTerminal:(NSWindowController<iTermWindowController> *)term
-       withArrangement:(NSDictionary *)arrangement {
-    // Add the existing tab, which is now fully populated, to the term.
-    [term appendTab:self];
-
+- (void)didAddToTerminal:(NSWindowController<iTermWindowController> *)term
+         withArrangement:(NSDictionary *)arrangement {
     NSDictionary* root = [arrangement objectForKey:TAB_ARRANGEMENT_ROOT];
     if ([root[TAB_ARRANGEMENT_IS_MAXIMIZED] boolValue]) {
         [self maximize];
@@ -2373,7 +2371,17 @@ static NSString* FormatRect(NSRect r) {
 
     [self numberOfSessionsDidChange];
     [term setDimmingForSessions];
-    [term updateTabColors];
+
+    // Handle old-style (now deprecated) tab color field.
+    NSString *colorName = [arrangement objectForKey:TAB_ARRANGEMENT_COLOR];
+    NSColor *tabColor = [[self class] colorForHtmlName:colorName];
+    if (tabColor) {
+        PTYSession *session = [self activeSession];
+        [session setSessionSpecificProfileValues:@{ KEY_TAB_COLOR: [tabColor dictionaryValue],
+                                                    KEY_USE_TAB_COLOR: @YES }];
+    } else {
+        [term updateTabColors];
+    }
 }
 
 + (PTYTab *)openTabWithArrangement:(NSDictionary*)arrangement
@@ -2388,8 +2396,10 @@ static NSString* FormatRect(NSRect r) {
     if ([[theTab sessionViews] count] == 0) {
         return nil;
     }
-    [theTab addToTerminal:term
-          withArrangement:arrangement];
+
+    [term appendTab:theTab];
+    [theTab didAddToTerminal:term
+             withArrangement:arrangement];
     return theTab;
 }
 
@@ -2466,16 +2476,7 @@ static NSString* FormatRect(NSRect r) {
                                       contents:contents];
     }
 
-    // Fill in the tab's color, which is unfortunately not stored in the root
-    // node of the arrangement.
-    NSColor *color = [[realParentWindow_ tabBarControl] tabColorForTabViewItem:tabViewItem_];
-    NSString *colorName = color ? [[self class] htmlNameForColor:color] : nil;
-    if (colorName) {
-        return @{ TAB_ARRANGEMENT_ROOT: rootNode,
-                  TAB_ARRANGEMENT_COLOR: colorName };
-    } else {
-        return @{ TAB_ARRANGEMENT_ROOT: rootNode };
-    }
+    return @{ TAB_ARRANGEMENT_ROOT: rootNode };
 }
 
 - (NSDictionary*)arrangement {
@@ -2788,8 +2789,9 @@ static NSString* FormatRect(NSRect r) {
     for (PTYSession *aSession in [theTab sessions]) {
         [[aSession view] setAutoresizesSubviews:NO];  // This is ok because it's a tmux tab
     }
-    [theTab addToTerminal:term
-          withArrangement:arrangement];
+
+    [term appendTab:theTab];
+    [theTab didAddToTerminal:term withArrangement:arrangement];
 
     return theTab;
 }

@@ -364,15 +364,16 @@ static const int kBadgeRightMargin = 10;
 - (void)drawTopMargin {
     // Draw a margin at the top of the visible area.
     NSRect topMarginRect = _visibleRect;
-    if (topMarginRect.origin.y > 0) {
-        topMarginRect.size.height = VMARGIN;
-        [self.delegate drawingHelperDrawBackgroundImageInRect:topMarginRect
-                                       blendDefaultBackground:YES];
+    topMarginRect.origin.y -=
+        MAX(0, VMARGIN - NSMinY(_delegate.enclosingScrollView.documentVisibleRect));
 
-        if (_showStripes) {
-            [self drawStripesInRect:topMarginRect];
-        }
-   }
+    topMarginRect.size.height = VMARGIN;
+    [self.delegate drawingHelperDrawBackgroundImageInRect:topMarginRect
+                                   blendDefaultBackground:YES];
+
+    if (_showStripes) {
+        [self drawStripesInRect:topMarginRect];
+    }
 }
 
 - (void)drawMarginsAndMarkForLine:(int)line y:(CGFloat)y {
@@ -446,7 +447,7 @@ static const int kBadgeRightMargin = 10;
 
 - (void)drawMarkIfNeededOnLine:(int)line leftMarginRect:(NSRect)leftMargin {
     VT100ScreenMark *mark = [self.delegate drawingHelperMarkOnLine:line];
-    if (mark.isVisible) {
+    if (mark.isVisible && self.drawMarkIndicators) {
         NSImage *image = mark.code ? _markErrImage : _markImage;
         CGFloat offset = (_cellSize.height - _markImage.size.height) / 2.0;
         [image drawAtPoint:NSMakePoint(leftMargin.origin.x,
@@ -1549,8 +1550,8 @@ static const int kBadgeRightMargin = 10;
 }
 
 - (NSRange)rangeOfVisibleRows {
-    int visibleRows = floor(_scrollViewContentSize.height / _cellSize.height);
-    CGFloat top = _scrollViewDocumentVisibleRect.origin.y + _frame.origin.y;
+    int visibleRows = floor((_scrollViewContentSize.height - VMARGIN * 2) / _cellSize.height);
+    CGFloat top = _scrollViewDocumentVisibleRect.origin.y;
     int firstVisibleRow = floor(top / _cellSize.height);
     if (firstVisibleRow < 0) {
         // I'm pretty sure this will never happen, but safety first when

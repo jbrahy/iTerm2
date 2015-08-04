@@ -29,6 +29,7 @@
     IBOutlet NSButton *_changeLogDir;
 
     IBOutlet NSTextField *_undoTimeout;
+    IBOutlet NSButton *_reduceFlicker;
 
     BOOL _awoken;
 }
@@ -65,7 +66,7 @@
         _changeLogDir.enabled = [self boolForKey:KEY_AUTOLOG];
         [self updateLogDirWarning];
     };
-    
+
     info = [self defineControl:_logDir
                            key:KEY_LOGDIR
                           type:kPreferenceInfoTypeStringTextField];
@@ -109,8 +110,13 @@
                            key:KEY_IDLE_CODE
                           type:kPreferenceInfoTypeIntegerTextField];
     info.range = NSMakeRange(0, 256);
-    
+
     [self updateRemoveJobButtonEnabled];
+
+    [self defineControl:_reduceFlicker
+                    key:KEY_REDUCE_FLICKER
+                   type:kPreferenceInfoTypeCheckbox];
+
 }
 
 - (void)layoutSubviewsForEditCurrentSessionMode {
@@ -239,9 +245,11 @@
     [panel setCanChooseFiles:NO];
     [panel setCanChooseDirectories:YES];
     [panel setAllowsMultipleSelection:NO];
-    
+
     if ([panel runModal] == NSOKButton) {
-        [_logDir setStringValue:[panel legacyDirectory]];
+        NSString *path = [[panel directoryURL] path];
+        _logDir.stringValue = path;
+        [self setString:path forKey:KEY_LOGDIR];
     }
     [self updateLogDirWarning];
 }

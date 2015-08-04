@@ -170,6 +170,7 @@
 #define KEY_TERMINAL_TYPE                     @"Terminal Type"
 #define KEY_USE_CANONICAL_PARSER              @"Use Canonical Parser"
 #define KEY_PLACE_PROMPT_AT_FIRST_COLUMN      @"Place Prompt at First Column"
+#define KEY_SHOW_MARK_INDICATORS              @"Show Mark Indicators"
 
 // Session
 #define KEY_AUTOLOG                           @"Automatically Log"
@@ -180,6 +181,7 @@
 #define KEY_PROMPT_CLOSE_DEPRECATED           @"Prompt Before Closing"  // Deprecated due to bad migration in 8/28 build
 #define KEY_PROMPT_CLOSE                      @"Prompt Before Closing 2"
 #define KEY_JOBS                              @"Jobs to Ignore"
+#define KEY_REDUCE_FLICKER                    @"Reduce Flicker"
 
 // Keyboard
 #define KEY_KEYBOARD_MAP                      @"Keyboard Map"
@@ -248,6 +250,8 @@ typedef enum {
 + (NSColor*)decodeColor:(NSDictionary*)plist;
 + (void)setDefaultsInBookmark:(NSMutableDictionary*)aDict;
 + (NSString *)shellLauncherCommand;
+// Login command that leaves you in your home directory.
++ (NSString *)standardLoginCommand;
 
 - (id)init;
 - (void)dealloc;

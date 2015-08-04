@@ -143,11 +143,19 @@
         if (string && ![item stringForType:(NSString *)kUTTypeFileURL]) {
             // Is a non-file URL string. File URLs get special handling.
             [values addObject:string];
-            CFStringRef description = UTTypeCopyDescription((CFStringRef)item.types[0]);
+            CFStringRef description = NULL;
+            for (NSString *theType in item.types) {
+                description = UTTypeCopyDescription((CFStringRef)theType);
+                if (description) {
+                    break;
+                }
+            }
             NSString *label = [NSString stringWithFormat:@"%@: “%@”",
-                               [(NSString *)description stringByCapitalizingFirstLetter],
+                               [((NSString *)description ?: @"Unknown Type") stringByCapitalizingFirstLetter],
                                [string ellipsizedDescriptionNoLongerThan:100]];
-            CFRelease(description);
+            if (description) {
+                CFRelease(description);
+            }
             [labels addObject:label];
         }
         if (!string) {
@@ -242,6 +250,7 @@
     BOOL containsShellCharacters =
         [string rangeOfCharacterFromSet:theSet].location != NSNotFound;
     BOOL containsDosNewlines = [string containsString:@"\n"];
+    BOOL containsNewlines = containsDosNewlines || [string containsString:@"\r"];
     BOOL containsUnicodePunctuation = ([string rangeOfRegex:kPasteSpecialViewControllerUnicodePunctuationRegularExpression].location != NSNotFound);
     BOOL convertValue = [iTermPreferences boolForKey:kPreferenceKeyPasteSpecialConvertDosNewlines];
     BOOL shouldEscape = [iTermPreferences boolForKey:kPreferenceKeyPasteSpecialEscapeShellCharsWithBackslash];
@@ -258,6 +267,8 @@
     _pasteSpecialViewController.selectedTabTransform = tabTransformTag;
     _pasteSpecialViewController.enableConvertNewlines = containsDosNewlines;
     _pasteSpecialViewController.shouldConvertNewlines = (containsDosNewlines && convertValue);
+    _pasteSpecialViewController.enableRemoveNewlines = containsNewlines;
+    _pasteSpecialViewController.shouldRemoveNewlines = NO;
     _pasteSpecialViewController.enableConvertUnicodePunctuation = containsUnicodePunctuation;
     _pasteSpecialViewController.shouldConvertUnicodePunctuation =
         (containsUnicodePunctuation && convertUnicodePunctuation);
@@ -278,7 +289,7 @@
 }
 
 - (void)updatePreview {
-    PasteEvent *pasteEvent = [self pasteEventWithString:_rawString];
+    PasteEvent *pasteEvent = [self pasteEventWithString:_rawString forPreview:YES];
     [iTermPasteHelper sanitizePasteEvent:pasteEvent encoding:_encoding];
     _preview.string = pasteEvent.string;
     NSNumberFormatter *bytesFormatter = [[[NSNumberFormatter alloc] init] autorelease];
@@ -397,13 +408,24 @@
 }
 
 - (PasteEvent *)pasteEvent {
-    return [self pasteEventWithString:_preview.textStorage.string];
+    return [self pasteEventWithString:_preview.textStorage.string forPreview:NO];
 }
 
-- (PasteEvent *)pasteEventWithString:(NSString *)string {
+- (PasteEvent *)pasteEventWithString:(NSString *)string forPreview:(BOOL)forPreview {
     iTermPasteFlags flags = _pasteSpecialViewController.flags;
     if (_base64only) {
         // We already base64 encoded the data, so don't set the flag or else it gets double encoded.
+        flags &= ~kPasteFlagsBase64Encode;
+    }
+
+    iTermTabTransformTags tabTransform = _pasteSpecialViewController.selectedTabTransform;
+    if (forPreview) {
+        // Generating the preview. Keep tabs so that changing tab options works.
+        tabTransform = kTabTransformNone;
+    } else {
+        // Generating live data. The preview has already applied these operations.
+        // Other operations are idempotent.
+        flags &= ~kPasteFlagsEscapeSpecialCharacters;
         flags &= ~kPasteFlagsBase64Encode;
     }
     return [PasteEvent pasteEventWithString:string
@@ -412,7 +434,7 @@
                                    chunkKey:nil
                                defaultDelay:self.delayBetweenChunks
                                    delayKey:nil
-                               tabTransform:_pasteSpecialViewController.selectedTabTransform
+                               tabTransform:tabTransform
                                spacesPerTab:_pasteSpecialViewController.numberOfSpacesPerTab];
 }
 

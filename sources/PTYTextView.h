@@ -135,7 +135,7 @@ typedef enum {
 - (NSDictionary *)textViewVariables;
 - (BOOL)textViewSuppressingAllOutput;
 - (BOOL)textViewIsZoomedIn;
-- (void)textViewWarnThatAccessibilityIsCausingSlowness;
+- (BOOL)textViewShouldShowMarkIndicators;
 
 // Is it possible to restart this session?
 - (BOOL)isRestartable;
@@ -242,9 +242,6 @@ typedef enum {
 // Semantic history. TODO: Move this into PTYSession.
 @property(nonatomic, readonly) iTermSemanticHistoryController *semanticHistoryController;
 
-// A text badge shown in the top right of the window
-@property(nonatomic, copy) NSString *badgeLabel;
-
 // Is this view in the key window?
 @property(nonatomic, readonly) BOOL isInKeyWindow;
 
@@ -254,6 +251,9 @@ typedef enum {
 // Used by tests to modify drawing helper. Called within -drawRect:.
 typedef void (^PTYTextViewDrawingHookBlock)(iTermTextDrawingHelper *);
 @property(nonatomic, copy) PTYTextViewDrawingHookBlock drawingHook;
+
+// For tests.
+@property(nonatomic, readonly) NSRect cursorFrame;
 
 // Returns the size of a cell for a given font. hspace and vspace are multipliers and the width
 // and height.
@@ -291,9 +291,8 @@ typedef void (^PTYTextViewDrawingHookBlock)(iTermTextDrawingHelper *);
 - (VT100GridCoordRange)rangeByTrimmingNullsFromRange:(VT100GridCoordRange)range
                                           trimSpaces:(BOOL)trimSpaces;
 
-// Returns the currently selected text. If pad is set, then the last line will be padded out to the
-// full width of the view with spaces.
-- (NSString *)selectedTextWithPad:(BOOL)pad;
+// Returns the currently selected text.
+- (NSString *)selectedText;
 
 // Copy with or without styles, as set by user defaults. Not for use when a copy item in the menu is invoked.
 - (void)copySelectionAccordingToUserPreferences;
@@ -447,6 +446,15 @@ typedef void (^PTYTextViewDrawingHookBlock)(iTermTextDrawingHelper *);
 - (void)setMinimumContrast:(double)value;
 
 - (BOOL)getAndResetDrawingAnimatedImageFlag;
+
+// A text badge shown in the top right of the window
+- (void)setBadgeLabel:(NSString *)badgeLabel;
+
+#pragma mark - Testing only
+
+- (id)selectedTextAttributed:(BOOL)attributed
+                cappedAtSize:(int)maxBytes
+           minimumLineNumber:(int)minimumLineNumber;
 
 @end
 

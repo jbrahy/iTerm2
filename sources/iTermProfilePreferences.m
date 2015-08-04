@@ -201,6 +201,7 @@ NSString *const kProfilePreferenceInitialDirectoryAdvancedValue = @"Advanced";
                   KEY_PROMPT_CLOSE: @(PROMPT_NEVER),
                   KEY_UNDO_TIMEOUT: @(5),
                   KEY_JOBS: @[],
+                  KEY_REDUCE_FLICKER: @YES,
                   KEY_AUTOLOG: @NO,
                   KEY_LOGDIR: @"",
                   KEY_SEND_CODE_WHEN_IDLE: @NO,
@@ -209,6 +210,7 @@ NSString *const kProfilePreferenceInitialDirectoryAdvancedValue = @"Advanced";
                   KEY_RIGHT_OPTION_KEY_SENDS: @(OPT_NORMAL),
                   KEY_APPLICATION_KEYPAD_ALLOWED: @NO,
                   KEY_PLACE_PROMPT_AT_FIRST_COLUMN: @YES,
+                  KEY_SHOW_MARK_INDICATORS: @YES,
                 };
         [dict retain];
     }
