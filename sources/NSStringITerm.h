@@ -34,6 +34,7 @@
 
 #import <Cocoa/Cocoa.h>
 
+#import "ITAddressBookMgr.h"
 #import "iTermOrderedDictionary.h"
 #import "iTermTuple.h"
 #import "NSString+CommonAdditions.h"
@@ -402,6 +403,12 @@ int decode_utf8_char(const unsigned char * restrict datap,
 
 - (iTermTuple<NSArray<NSString *> *, NSString *> *)queryBySplittingLiteralPhrases;
 - (ScreenCharArray *)asScreenCharArray;
+
+// Returns the number of terminal cells this string occupies when rendered.
+- (int)screenWidthWithAmbiguousIsDoubleWidth:(BOOL)ambiguousIsDoubleWidth
+                              unicodeVersion:(NSInteger)unicodeVersion
+                               normalization:(iTermUnicodeNormalization)normalization;
+
 + (NSData *)dataForHexCodes:(NSString *)codes;
 - (NSString *)it_pasteBracketed;
 

@@ -3944,7 +3944,9 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
             }
         }
 
-        NSString *const message = [NSString stringWithFormat:@" %@ ", unpaddedMessage];
+        NSString *customText = [iTermAdvancedSettingsModel sessionEndMessageText];
+        NSString *messageText = (customText.length > 0) ? customText : unpaddedMessage;
+        NSString *const message = [NSString stringWithFormat:@" %@ ", messageText];
         if (mutableState.cursorX != 1) {
             [mutableState appendCarriageReturnLineFeed];
         }
@@ -3959,15 +3961,41 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
                   alternateSemantics:YES];
         [terminal updateDefaultChar];
         mutableState.currentGrid.defaultChar = terminal.defaultChar;
-        int width = (mutableState.width - message.length) / 2;
-        if (width > 0) {
-            [mutableState appendNativeImageAtCursorWithName:@"BrokenPipeDivider"
-                                                      width:width];
+        NSString *dividerChar = [iTermAdvancedSettingsModel sessionEndMessageDividerCharacter];
+        const int messageScreenWidth = [message screenWidthWithAmbiguousIsDoubleWidth:mutableState.config.treatAmbiguousCharsAsDoubleWidth
+                                                                       unicodeVersion:mutableState.config.unicodeVersion
+                                                                        normalization:mutableState.config.normalization];
+        const int dividerCharWidth = [dividerChar screenWidthWithAmbiguousIsDoubleWidth:mutableState.config.treatAmbiguousCharsAsDoubleWidth
+                                                                         unicodeVersion:mutableState.config.unicodeVersion
+                                                                          normalization:mutableState.config.normalization] ?: 1;
+        const int width = (mutableState.width - messageScreenWidth) / 2;
+        if (dividerChar.length == 0) {
+            if (width > 0) {
+                [mutableState appendNativeImageAtCursorWithName:@"BrokenPipeDivider"
+                                                          width:width];
+            }
+        } else if (width > 0) {
+            NSMutableString *leftDivider = [NSMutableString string];
+            const int dividerCount = width / dividerCharWidth;
+            for (int i = 0; i < dividerCount; i++) {
+                [leftDivider appendString:dividerChar];
+            }
+            [mutableState appendStringAtCursor:leftDivider];
         }
         [mutableState appendStringAtCursor:message];
-        if (width > 0) {
-            [mutableState appendNativeImageAtCursorWithName:@"BrokenPipeDivider"
-                                                      width:(mutableState.width - mutableState.cursorX + 1)];
+        const int rightWidth = mutableState.width - mutableState.cursorX + 1;
+        if (dividerChar.length == 0) {
+            if (rightWidth > 0) {
+                [mutableState appendNativeImageAtCursorWithName:@"BrokenPipeDivider"
+                                                          width:rightWidth];
+            }
+        } else if (rightWidth > 0) {
+            NSMutableString *rightDivider = [NSMutableString string];
+            const int rightDividerCount = rightWidth / dividerCharWidth;
+            for (int i = 0; i < rightDividerCount; i++) {
+                [rightDivider appendString:dividerChar];
+            }
+            [mutableState appendStringAtCursor:rightDivider];
         }
         [mutableState appendCarriageReturnLineFeed];
         [terminal setForegroundColor:savedFgColor.foregroundColor
@@ -4131,7 +4159,9 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
     [_shell killWithMode:iTermJobManagerKillingModeBrokenPipe];
     if ([self shouldPostUserNotification] &&
         [iTermProfilePreferences boolForKey:KEY_SEND_SESSION_ENDED_ALERT inProfile:self.profile]) {
-        [[iTermNotificationController sharedInstance] notify:@"Session Ended"
+        NSString *customText = [iTermAdvancedSettingsModel sessionEndMessageText];
+        NSString *notificationText = (customText.length > 0) ? customText : @"Session Ended";
+        [[iTermNotificationController sharedInstance] notify:notificationText
                                              withDescription:[NSString stringWithFormat:@"Session \"%@\" in tab #%d just terminated.",
                                                               [[self name] removingHTMLFromTabTitleIfNeeded],
                                                               [_delegate tabNumber]]];
@@ -4146,7 +4176,7 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
                                                  VT100ScreenMutableState *mutableState,
                                                  id<VT100ScreenDelegate> delegate) {
             [terminal resetForReason:VT100TerminalResetReasonBrokenPipe];
-            [self appendBrokenPipeMessage:@"Session Restarted"];
+            [self appendBrokenPipeMessage:[iTermAdvancedSettingsModel sessionRestartedMessageText]];
             [self replaceTerminatedShellWithNewInstance];
         }];
         return;
@@ -4154,7 +4184,7 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
 
     if (_shortLivedSingleUse) {
         [[iTermBuriedSessions sharedInstance] restoreSession:self];
-        [self appendBrokenPipeMessage:@"Finished"];
+        [self appendBrokenPipeMessage:[iTermAdvancedSettingsModel sessionFinishedMessageText]];
         // restart is not respected here because it doesn't make sense and would make for an awful bug.
         if (self.endAction == iTermSessionEndActionClose &&
             [_delegate sessionShouldAutoClose:self]) {
