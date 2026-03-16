@@ -7444,6 +7444,7 @@ hidingToolbeltShouldResizeWindow:(BOOL)hidingToolbeltShouldResizeWindow
     [item setRepresentedObject:tabViewItem];
     _tabViewItemForColorPicker = tabViewItem;
     [rootMenu addItem:item];
+    rootMenu.minimumWidth = tabColorViewSize.width;
 
     for (NSMenuItem *item in rootMenu.itemArray) {
         item.target = self;
