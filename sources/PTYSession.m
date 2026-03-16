@@ -2064,7 +2064,8 @@ ITERM_WEAKLY_REFERENCEABLE
                 environmentArg = aSession.environment ?: @{};
                 commandArg = aSession.program;
                 if (oldCWD &&
-                    [aSession.program isEqualToString:[ITAddressBookMgr standardLoginCommand]]) {
+                    ([aSession.program isEqualToString:[ITAddressBookMgr standardLoginCommand]] ||
+                     [aSession.program isEqualToString:[ITAddressBookMgr legacyStandardLoginCommand]])) {
                     // Create a login session that drops you in the old directory instead of
                     // using login -fp "$USER". This lets saved arrangements properly restore
                     // the working directory when the profile specifies the home directory.
