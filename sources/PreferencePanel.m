@@ -243,14 +243,11 @@ static PreferencePanel *gSessionsPreferencePanel;
 
 - (NSRect)searchTextRectForBounds:(NSRect)rect {
     NSRect result = [super searchTextRectForBounds:rect];
-    // Adjust vertical position to center the text properly on Tahoe
-    result.origin.y -= 2;
     return result;
 }
 
 - (NSRect)searchButtonRectForBounds:(NSRect)rect {
     NSRect result = [super searchButtonRectForBounds:rect];
-    result.origin.y -= 2;
     return result;
 }
 
