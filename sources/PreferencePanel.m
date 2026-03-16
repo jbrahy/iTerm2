@@ -977,6 +977,8 @@ andEditComponentWithIdentifier:(NSString *)identifier
     if (!_bigSurSearchFieldToolbarItem) {
         _bigSurSearchFieldToolbarItem = [[NSSearchToolbarItem alloc] initWithItemIdentifier:iTermPreferencePanelSearchFieldToolbarItemIdentifier];
         _bigSurSearchFieldToolbarItem.label = @"";
+        // Prevent the search field from expanding when focused, which shifts toolbar icons.
+        _bigSurSearchFieldToolbarItem.preferredWidthForSearchField = 180;
         _bigSurSearchFieldToolbarItem.searchField.delegate = self;
 
         // Workaround for macOS 26 bug where text is not vertically centered. Issue 12708.
