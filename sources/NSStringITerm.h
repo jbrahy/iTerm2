@@ -34,9 +34,9 @@
 
 #import <Cocoa/Cocoa.h>
 
-#import "ITAddressBookMgr.h"
 #import "iTermOrderedDictionary.h"
 #import "iTermTuple.h"
+#import "iTermUnicodeNormalization.h"
 #import "NSString+CommonAdditions.h"
 #import "VT100GridTypes.h"
 
