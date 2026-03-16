@@ -16,17 +16,20 @@ DEPLOYMENT_TARGET=12.0
 
 # Build product directory: defaults to xcodebuild's SYMROOT.
 # Override with BUILD_DIR=/path/to/dir on the command line.
+# Skip validation for 'make setup' since xcodebuild may not work yet.
 ifndef BUILD_DIR
   BUILD_DIR := $(shell xcodebuild -scheme iTerm2 -showBuildSettings 2>/dev/null | awk -F ' = ' '/^ *SYMROOT/{print $$2; exit}')
 endif
-ifeq ($(strip $(BUILD_DIR)),)
-  $(error Could not determine BUILD_DIR from xcodebuild -showBuildSettings. Is Xcode installed? Set BUILD_DIR explicitly to override.)
-endif
-ifeq ($(patsubst /%,%,$(BUILD_DIR)),$(BUILD_DIR))
-  $(error BUILD_DIR is not an absolute path: $(BUILD_DIR))
-endif
-ifneq ($(shell d='$(BUILD_DIR)'; while [ ! -d "$$d" ]; do d=$$(dirname "$$d"); done; [ -w "$$d" ] && echo ok),ok)
-  $(error BUILD_DIR is not writable: $(BUILD_DIR))
+ifneq ($(MAKECMDGOALS),setup)
+  ifeq ($(strip $(BUILD_DIR)),)
+    $(error Could not determine BUILD_DIR from xcodebuild -showBuildSettings. Is Xcode installed? Set BUILD_DIR explicitly to override.)
+  endif
+  ifeq ($(patsubst /%,%,$(BUILD_DIR)),$(BUILD_DIR))
+    $(error BUILD_DIR is not an absolute path: $(BUILD_DIR))
+  endif
+  ifneq ($(shell d='$(BUILD_DIR)'; while [ ! -d "$$d" ]; do d=$$(dirname "$$d"); done; [ -w "$$d" ] && echo ok),ok)
+    $(error BUILD_DIR is not writable: $(BUILD_DIR))
+  endif
 endif
 
 # Code signing: disabled by default (contributor-friendly).
@@ -89,10 +92,11 @@ setup:
 	git submodule update --init --recursive
 	PATH="$(ORIG_PATH)" xcodebuild -downloadComponent MetalToolchain
 	@if tools/check-xcode-version; then \
+		BUILD_DIR=$$(xcodebuild -scheme iTerm2 -showBuildSettings 2>/dev/null | awk -F ' = ' '/^ *SYMROOT/{print $$2; exit}'); \
 		if [ "$$USER" = "gnachman" ]; then \
-			$(MAKE) paranoid-deps SIGNED=1; \
+			$(MAKE) paranoid-deps SIGNED=1 BUILD_DIR="$$BUILD_DIR"; \
 		else \
-			$(MAKE) paranoid-deps; \
+			$(MAKE) paranoid-deps BUILD_DIR="$$BUILD_DIR"; \
 		fi; \
 	fi
 
