@@ -32,6 +32,7 @@
 #import "NSWindow+PSM.h"
 #import "NSWindow+iTerm.h"
 #import "NSWorkspace+iTerm.h"
+#import "PSMCachedTitle.h"
 #import "PSMDarkHighContrastTabStyle.h"
 #import "PSMDarkTabStyle.h"
 #import "PSMLightHighContrastTabStyle.h"
@@ -8034,6 +8035,10 @@ static CGFloat iTermDimmingAmount(PSMTabBarControl *tabView) {
         return @([iTermAdvancedSettingsModel lightModeInactiveTabDarkness]);
     } else if ([option isEqualToString:PSMTabBarControlOptionDarkModeInactiveTabDarkness]) {
         return @([iTermAdvancedSettingsModel darkModeInactiveTabDarkness]);
+    } else if ([option isEqualToString:PSMTabBarControlOptionPUAFontProvider]) {
+        // Return self as the PUA font provider. PseudoTerminal delegates to the current
+        // session's font table, so font table changes are automatically picked up.
+        return self;
     }
     return nil;
 }
@@ -10431,7 +10436,7 @@ static BOOL iTermApproximatelyEqualRects(NSRect lhs, NSRect rhs, double epsilon)
         case WINDOW_TYPE_COMPACT:
         case WINDOW_TYPE_COMPACT_MAXIMIZED:
             return nil;
-            
+
         case WINDOW_TYPE_TOP_PERCENTAGE:
         case WINDOW_TYPE_LEFT_PERCENTAGE:
         case WINDOW_TYPE_RIGHT_PERCENTAGE:
@@ -10449,6 +10454,16 @@ static BOOL iTermApproximatelyEqualRects(NSRect lhs, NSRect rhs, double epsilon)
         case WINDOW_TYPE_TRADITIONAL_FULL_SCREEN:
             return self.currentSession.subtitle;
     }
+}
+
+- (id<PSMPUAFontProvider>)rootTerminalViewPUAFontProvider {
+    return self;
+}
+
+#pragma mark - PSMPUAFontProvider
+
+- (NSFont *)fontForPUACodePoint:(UTF32Char)codePoint {
+    return [self.currentSession.textview.fontTable fontForPUACodePoint:codePoint];
 }
 
 - (BOOL)rootTerminalViewShouldRevealStandardWindowButtons {
