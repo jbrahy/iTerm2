@@ -20,6 +20,7 @@
 #import "NSStringITerm.h"
 #import "Profile.h"
 #import "ProfileModel.h"
+#import "iTermProfilePreferences.h"
 #import "VT100RemoteHost.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -417,16 +418,16 @@ static NSString *const iTermStatusBarHostnameComponentAbbreviateLocalhost = @"ab
 }
 
 - (void)openCurrentPathInNewWindow:(NSMenuItem *)sender {
-    [self launchSessionWithPath:self.fullString style:iTermOpenStyleNewWindow terminal:nil];
+    [self launchSessionWithPath:self.fullString style:iTermOpenStyleWindow terminal:nil];
 }
 
 - (void)openCurrentPathInNewTab:(NSMenuItem *)sender {
     NSString *path = self.fullString;
     PseudoTerminal *currentTerminal = [[iTermController sharedInstance] currentTerminal];
     if (currentTerminal) {
-        [self launchSessionWithPath:path style:iTermOpenStyleNewTabAtEndOfTabs terminal:currentTerminal];
+        [self launchSessionWithPath:path style:iTermOpenStyleTab terminal:currentTerminal];
     } else {
-        [self launchSessionWithPath:path style:iTermOpenStyleNewWindow terminal:nil];
+        [self launchSessionWithPath:path style:iTermOpenStyleWindow terminal:nil];
     }
 }
 
@@ -440,10 +441,10 @@ static NSString *const iTermStatusBarHostnameComponentAbbreviateLocalhost = @"ab
     if (!profile) {
         return;
     }
-    profile = [profile mutableCopy];
-    profile[KEY_WORKING_DIRECTORY] = path;
-    profile[KEY_CUSTOM_DIRECTORY] = kProfilePreferenceInitialDirectoryCustomValue;
-    [iTermSessionLauncher launchBookmark:profile
+    MutableProfile *mutableProfile = [profile mutableCopy];
+    mutableProfile[KEY_WORKING_DIRECTORY] = path;
+    mutableProfile[KEY_CUSTOM_DIRECTORY] = kProfilePreferenceInitialDirectoryCustomValue;
+    [iTermSessionLauncher launchBookmark:mutableProfile
                               inTerminal:terminal
                                    style:style
                                  withURL:nil
