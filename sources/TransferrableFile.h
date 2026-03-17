@@ -8,6 +8,8 @@
 
 #import <Foundation/Foundation.h>
 
+NS_ASSUME_NONNULL_BEGIN
+
 @class TransferrableFile;
 
 typedef NS_ENUM(NSInteger, TransferrableFileStatus) {
@@ -28,7 +30,7 @@ typedef void (^TransferrableFileCompletionBlock)(BOOL success, NSString * _Nulla
 @property(atomic, assign) TransferrableFileStatus status;
 @property(atomic, assign) NSUInteger bytesTransferred;
 @property(atomic, assign) NSInteger fileSize;  // -1 if unknown
-@property(atomic, retain) TransferrableFile *successor;
+@property(atomic, retain, nullable) TransferrableFile *successor;
 @property(atomic, assign) BOOL hasPredecessor;
 @property(atomic, assign) BOOL isZipOfFolder;
 @property(atomic, copy, nullable) TransferrableFileCompletionBlock completionBlock;
@@ -38,30 +40,32 @@ typedef void (^TransferrableFileCompletionBlock)(BOOL success, NSString * _Nulla
 + (BOOL)fileNameIsLocked:(NSString *)name;
 
 // These two are only needed for keyboard-interactive auth
-- (NSString *)protocolName;
-- (NSString *)authRequestor;
+- (nullable NSString *)protocolName;
+- (nullable NSString *)authRequestor;
 
-- (NSString *)displayName;
-- (NSString *)shortName;
-- (NSString *)subheading;
+- (nullable NSString *)displayName;
+- (nullable NSString *)shortName;
+- (nullable NSString *)subheading;
 - (void)download;
 - (void)upload;
 - (void)stop;
-- (NSString *)localPath;  // For downloads, should be nil until download is complete.
-- (NSString *)error;
-- (NSString *)destination;
+- (nullable NSString *)localPath;  // For downloads, should be nil until download is complete.
+- (nullable NSString *)error;
+- (nullable NSString *)destination;
 - (NSTimeInterval)timeOfLastStatusChange;
 - (BOOL)isDownloading;
 - (void)didFailWithError:(NSString *)error;
 
 #pragma mark - Utility
 
-- (NSString *)finalDestinationForPath:(NSString *)baseName
-                 destinationDirectory:(NSString *)destinationDirectory
-                               prompt:(BOOL)prompt;
+- (nullable NSString *)finalDestinationForPath:(NSString *)baseName
+                          destinationDirectory:(NSString *)destinationDirectory
+                                        prompt:(BOOL)prompt;
 - (NSString *)downloadsDirectory;
-- (BOOL)quarantine:(NSString *)path sourceURL:(NSURL *)sourceURL;
+- (BOOL)quarantine:(nullable NSString *)path sourceURL:(nullable NSURL *)sourceURL;
 - (void)failedToRemoveUnquarantinedFileAt:(NSString *)path;
 
 @end
+
+NS_ASSUME_NONNULL_END
 
