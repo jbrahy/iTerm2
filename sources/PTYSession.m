@@ -7215,7 +7215,9 @@ static NSString *const PTYSessionComposerPrefixUserDataKeyDetectedByTrigger = @"
     }
 
     DLog(@"Set bookmark and reload profile");
-    [[ProfileModel sessionsInstance] setBookmark:temp withGuid:temp[KEY_GUID]];
+    [ProfileModel performWithLessLogging:(self.tmuxMode != TMUX_NONE) block:^{
+        [[ProfileModel sessionsInstance] setBookmark:temp withGuid:temp[KEY_GUID]];
+    }];
 
     if (reload) {
         // Update this session's copy of the bookmark
@@ -7295,7 +7297,7 @@ DLog(args); \
                             @"I am divorced with guid %@ but the sessions instance has no such guid. Log:\n%@\n\nModel log:\n%@\nEnd.",
                             guid,
                             _divorceDecree,
-                            [[[[ProfileModel sessionsInstance] debugHistoryForGuid:guid] componentsJoinedByString:@"\n"] it_compressedString]);
+                            [ProfileModel compressedLog]);
         return guid;
     }
     NSMutableArray<NSString *> *logs = [NSMutableArray array];
