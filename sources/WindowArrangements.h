@@ -9,23 +9,16 @@
 #import <Cocoa/Cocoa.h>
 #import "ArrangementPreviewView.h"
 
-@interface WindowArrangements : NSViewController  {
-    IBOutlet NSTableColumn *defaultColumn_;
-    IBOutlet NSTableColumn *titleColumn_;
-    IBOutlet NSTableView *tableView_;
-    IBOutlet ArrangementPreviewView *previewView_;
-    IBOutlet NSButton *deleteButton_;
-    IBOutlet NSButton *defaultButton_;
-}
+@class iTermSavePanelItem;
+
+@interface WindowArrangements : NSViewController <NSTableViewDataSource, NSTableViewDelegate>
+@property (nonatomic, readonly, class) NSInteger generation;
 
 + (WindowArrangements *)sharedInstance;
 
 + (int)count;
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)aTableView;
 
 + (void)setArrangement:(NSArray *)arrangement withName:(NSString *)name;
-
-- (id)tableView:(NSTableView *)aTableView objectValueForTableColumn:(NSTableColumn *)aTableColumn row:(NSInteger)rowIndex;
 
 + (BOOL)hasWindowArrangement:(NSString *)name;
 
@@ -38,11 +31,15 @@
 
 + (NSArray *)allNames;
 
++ (void)refreshRestoreArrangementsMenu:(NSMenuItem *)menuItem
+                          withSelector:(SEL)selector
+                       defaultShortcut:(NSString *)defaultShortcut
+                            identifier:(NSString *)identifier;
+
++ (void)nameForNewArrangement:(void (^)(NSString *))completion;
++ (void)selectNameAndWhetherToIncludeContentsWithCompletion:(void (^)(NSString *name, iTermSavePanelItem *saveItem))completion;
+
 - (IBAction)setDefault:(id)sender;
 - (IBAction)deleteSelectedArrangement:(id)sender;
-
-#pragma mark Delegate methods
-
-- (void)tableViewSelectionDidChange:(NSNotification *)aNotification;
 
 @end

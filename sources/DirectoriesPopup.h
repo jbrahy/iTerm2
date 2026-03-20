@@ -6,18 +6,18 @@
 //
 //
 
-#import "Popup.h"
+#import "iTermPopupWindowController.h"
 #import "PopupEntry.h"
 
-@class iTermDirectoryEntry;
-@class VT100RemoteHost;
+@class iTermRecentDirectoryMO;
+@protocol VT100RemoteHostReading;
 
 @interface DirectoriesPopupEntry : PopupEntry
-@property(nonatomic, retain) iTermDirectoryEntry *entry;
+@property(nonatomic, retain) iTermRecentDirectoryMO *entry;
 @end
 
-@interface DirectoriesPopupWindowController : Popup
+@interface DirectoriesPopupWindowController : iTermPopupWindowController
 
-- (void)loadDirectoriesForHost:(VT100RemoteHost *)host;
+- (void)loadDirectoriesForHost:(id<VT100RemoteHostReading>)host;
 
 @end

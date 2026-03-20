@@ -200,14 +200,13 @@
     XCTAssert([_parser.data isEqualToString:@"Abc~"]);
 }
 
-- (void)testDCSPassthrough {
+- (void)testDCSCatchesBinaryGarbage {
     VT100Token *token = [self tokenForDataWithFormat:@"%cPAbc%c%c%c%c~",
                             VT100CC_ESC, VT100CC_LF, VT100CC_EM, VT100CC_FS, VT100CC_DEL];
-    XCTAssert(token->type == VT100_WAIT);
+    XCTAssert(token->type == VT100_BINARY_GARBAGE);
     XCTAssert(_parser.state == kVT100DCSStatePassthrough);
     XCTAssert([_parser.parameters isEqual:@[ ]]);
-    NSString *expected = [NSString stringWithFormat:@"Abc%c%c%c~",
-                          VT100CC_LF, VT100CC_EM, VT100CC_FS];
+    NSString *expected = [NSString stringWithFormat:@"Abc%c", VT100CC_LF];
     XCTAssertEqualObjects(_parser.data, expected);
 }
 
@@ -261,13 +260,8 @@
 
     token = [self tokenForDataWithFormat:@"%%exit\n"];
     XCTAssert(token->type == TMUX_EXIT);
-    XCTAssert(_parser.isHooked);
-    XCTAssert(_context.datalen == 0);
-    XCTAssert(_parser.state == kVT100DCSStatePassthrough);
-
-    token = [self tokenForDataWithFormat:@"\e\\"];
-    XCTAssert(token->type == VT100_SKIP);
     XCTAssert(!_parser.isHooked);
+    XCTAssert(_context.datalen == 0);
     XCTAssert(_parser.state == kVT100DCSStateGround);
 }
 
@@ -324,14 +318,9 @@
 
     token = [self tokenForDataWithFormat:@"%%exit\r\n"];
     XCTAssert(token->type == TMUX_EXIT);
-    XCTAssert(_parser.isHooked);
-    XCTAssert(_context.datalen == 0);
-    [_savedState removeAllObjects];
-
-    token = [self tokenForDataWithFormat:@"%c\\", VT100CC_ESC];
-    XCTAssert(token->type == VT100_SKIP);
     XCTAssert(!_parser.isHooked);
     XCTAssert(_context.datalen == 0);
+    [_savedState removeAllObjects];
 }
 
 -  (void)testDCSTmuxWrap {
@@ -374,6 +363,40 @@
     XCTAssert(CVectorCount(&v) == 1);
     VT100Token *token = CVectorGetObject(&v, 0);
     XCTAssert(token->type == VT100CSI_SGR);
+}
+
+- (void)testDECRQSS {
+    VT100Token *token = [self tokenForDataWithFormat:@"%cP$q q%c\\", VT100CC_ESC, VT100CC_ESC];
+    XCTAssert(token->type == DCS_DECRQSS);
+    XCTAssertEqualObjects(token.string, @" q");
+}
+
+- (void)testIssue9070 {
+    VT100Parser *parser = [[[VT100Parser alloc] init] autorelease];
+    parser.encoding = NSUTF8StringEncoding;
+    unsigned char preambleBytes[8] = {
+        0x1B, 0x50, 0x30, 0x3B, 0x30, 0x3B, 0x38, 0x71
+    };
+    NSMutableData *data = [NSMutableData dataWithBytes:preambleBytes length:8];
+    for (int i = 0; i < 4453 * 43; i++) {
+        [data appendBytes:"" length:1];
+    }
+    [data appendBytes:"\x1b\x5c" length:2];
+    CVector v;
+    CVectorCreate(&v, 10);
+    while (data.length > 0) {
+        NSInteger count = MIN(1024, data.length);
+        [parser putStreamData:data.bytes length:count];
+        [parser addParsedTokensToVector:&v];
+        [data replaceBytesInRange:NSMakeRange(0, count) withBytes:"" length:0];
+    }
+    XCTAssert(CVectorCount(&v) == 2);
+
+    VT100Token *token = CVectorGetObject(&v, 0);
+    XCTAssert(token->type == VT100_SKIP);
+
+    token = CVectorGetObject(&v, 1);
+    XCTAssert(token->type == DCS_SIXEL);
 }
 
 @end

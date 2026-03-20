@@ -24,6 +24,7 @@ extern NSString *kMovePanePointerAction;
 extern NSString *kSendEscapeSequencePointerAction;
 extern NSString *kSendHexCodePointerAction;
 extern NSString *kSendTextPointerAction;
+extern NSString *kInvokeScriptFunction;
 extern NSString *kSelectPaneLeftPointerAction;
 extern NSString *kSelectPaneRightPointerAction;
 extern NSString *kSelectPaneAbovePointerAction;
@@ -35,43 +36,22 @@ extern NSString *kNewHorizontalSplitWithProfilePointerAction;
 extern NSString *kSelectNextPanePointerAction;
 extern NSString *kSelectPreviousPanePointerAction;
 extern NSString *kExtendSelectionPointerAction;
+extern NSString *kQuickLookAction;
+extern NSString *kIgnoreAction;
+extern NSString *kSelectMenuItemPointerAction;
+extern NSString *kCopyLinkAddressPointerAction;
 
 extern NSString *kThreeFingerClickGesture;
 extern NSString *kThreeFingerSwipeRight;
 extern NSString *kThreeFingerSwipeLeft;
 extern NSString *kThreeFingerSwipeUp;
 extern NSString *kThreeFingerSwipeDown;
+extern NSString *kForceTouchSingleClick;
 
 // This manages the tableview and associated buttons and controls for managing pointer actions.
-@interface PointerPrefsController : NSObject {
-    IBOutlet NSTableView *tableView_;
-    IBOutlet NSTableColumn *buttonColumn_;
-    IBOutlet NSTableColumn *actionColumn_;
+@interface PointerPrefsController : NSObject
 
-    IBOutlet NSPanel *panel_;
-    IBOutlet NSTextField *editButtonLabel_;
-    IBOutlet NSPopUpButton *editButton_;
-    IBOutlet NSTextField *editModifiersLabel_;
-    IBOutlet NSButton *editModifiersCommand_;
-    IBOutlet NSButton *editModifiersOption_;
-    IBOutlet NSButton *editModifiersShift_;
-    IBOutlet NSButton *editModifiersControl_;
-    IBOutlet NSTextField *editActionLabel_;
-    IBOutlet NSPopUpButton *editAction_;
-    IBOutlet NSTextField *editClickTypeLabel_;
-    IBOutlet NSPopUpButton *editClickType_;
-    IBOutlet NSTextField *editArgumentLabel_;
-    IBOutlet NSPopUpButton *editArgumentButton_;
-    IBOutlet NSTextField *editArgumentField_;
-
-    IBOutlet NSButton *ok_;
-    IBOutlet NSButton *remove_;
-
-    NSString *origKey_;
-    BOOL hasSelection_;
-}
-
-@property (nonatomic, assign) BOOL hasSelection;
+@property (nonatomic) BOOL hasSelection;
 
 + (NSString *)actionWithButton:(int)buttonNumber
                      numClicks:(int)numClicks
@@ -79,16 +59,23 @@ extern NSString *kThreeFingerSwipeDown;
 + (NSString *)argumentWithButton:(int)buttonNumber
                        numClicks:(int)numClicks
                        modifiers:(int)modMask;
++ (BOOL)useCompatibilityEscapingWithButton:(int)buttonNumber
+                                 numClicks:(int)numClicks
+                                 modifiers:(int)modMask;
 
 + (NSString *)actionForTapWithTouches:(int)numTouches
                             modifiers:(int)modMask;
 + (NSString *)argumentForTapWithTouches:(int)numTouches
                               modifiers:(int)modMask;
++ (BOOL)useCompatibilityEscapingForTapWithTouches:(int)numTouches
+                                        modifiers:(int)modMask;
 
 + (NSString *)actionForGesture:(NSString *)gesture
                      modifiers:(int)modMask;
 + (NSString *)argumentForGesture:(NSString *)gesture
                        modifiers:(int)modMask;
++ (BOOL)useCompatibilityEscapingForGesture:(NSString *)gesture
+                                 modifiers:(int)modMask;
 + (BOOL)haveThreeFingerTapEvents;
 
 - (void)setButtonNumber:(int)buttonNumber clickCount:(int)clickCount modifiers:(int)modMask;

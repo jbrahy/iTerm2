@@ -23,7 +23,17 @@
  */
 
 #import "ProfileListView.h"
+
+#import "SFSymbolEnum/SFSymbolEnum.h"
+#import "DebugLogging.h"
+#import "iTermSplitViewAnimation.h"
 #import "ITAddressBookMgr.h"
+#import "NSDictionary+Profile.h"
+#import "NSArray+iTerm.h"
+#import "NSMutableAttributedString+iTerm.h"
+#import "NSObject+iTerm.h"
+#import "NSTableView+iTerm.h"
+#import "NSTextField+iTerm.h"
 #import "PTYSession.h"
 #import "ProfileModel.h"
 #import "ProfileModelWrapper.h"
@@ -32,15 +42,23 @@
 #import "ProfileTagsView.h"
 #import "iTermSearchField.h"
 #import "NSView+RecursiveDescription.h"
+#import "NSWindow+iTerm.h"
+#import "NSWorkspace+iTerm.h"
 
-#define kProfileTableViewDataType @"iTerm2ProfileGuid"
+#define kProfileTableViewDataType @"com.googlecode.iterm2.iTerm2ProfileGuid"
+
+// NSAttributedString attribute keys
+static NSString *const iTermProfileListViewRestorableStateTagsVisible = @"iTermProfileListViewRestorableStateTagsVisible";
+static NSString *const iTermProfileListViewRestorableStateTagsFraction = @"iTermProfileListViewRestorableStateTagsFraction";
+
+NSString *const kProfileWasDeletedNotification = @"kProfileWasDeletedNotification";
 
 const int kSearchWidgetHeight = 22;
 const int kInterWidgetMargin = 10;
 const CGFloat kTagsViewWidth = 0;  // TODO: remember this for each superview
 const CGFloat kDefaultTagsWidth = 80;
 
-@interface ProfileListView () <ProfileTagsViewDelegate>
+@interface ProfileListView () <NSSearchFieldDelegate, ProfileTagsViewDelegate>
 @end
 
 @implementation ProfileListView {
@@ -52,30 +70,45 @@ const CGFloat kDefaultTagsWidth = 80;
     NSTableColumn* commandColumn_;
     NSTableColumn* shortcutColumn_;
     NSTableColumn* tagsColumn_;
-    NSObject<ProfileListViewDelegate> *delegate_;
+    id<ProfileListViewDelegate> delegate_;
     NSSet* selectedGuids_;
     BOOL debug;
     ProfileModelWrapper *dataSource_;
     int margin_;
     ProfileTagsView *tagsView_;
     NSSplitView *splitView_;
-    CGFloat lastTagsWidth_;
+    NSMutableDictionary<NSNumber *, NSNumber *> *_savedHeights;
+
+    // Cached row height info
+    BOOL _haveHeights;
+    CGFloat _heightWithTags;
+    CGFloat _heightWithoutTags;
+    NSFont *_font;
+    NSInteger _restoringSelection;
 }
 
-- (id)initWithFrame:(NSRect)frameRect
-{
+- (instancetype)initWithFrame:(NSRect)frameRect {
     return [self initWithFrame:frameRect model:[ProfileModel sharedInstance]];
 }
 
-// This is the designated initializer.
-- (id)initWithFrame:(NSRect)frameRect model:(ProfileModel*)dataSource
-{
+
+- (instancetype)initWithFrame:(NSRect)frameRect model:(ProfileModel*)dataSource {
+    return [self initWithFrame:frameRect model:dataSource font:nil];
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect model:(ProfileModel *)dataSource font:(NSFont *)font {
+    return [self initWithFrame:frameRect model:dataSource font:font profileTypes:ProfileTypeAll];
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect model:(ProfileModel*)dataSource font:(NSFont *)font profileTypes:(ProfileType)profileTypes {
     self = [super initWithFrame:frameRect];
     if (self) {
+        _profileTypes = profileTypes;
+        _savedHeights = [[NSMutableDictionary alloc] init];
         margin_ = kInterWidgetMargin;
         [self setUnderlyingDatasource:dataSource];
         debug = NO;
-        
+
         NSRect frame = [self frame];
         NSRect searchFieldFrame;
         searchFieldFrame.origin.x = 0;
@@ -84,10 +117,12 @@ const CGFloat kDefaultTagsWidth = 80;
         searchFieldFrame.size.width = frame.size.width;
         searchField_ = [[iTermSearchField alloc] initWithFrame:searchFieldFrame];
         [self _addTags:[[dataSource_ underlyingModel] allTags] toSearchField:searchField_];
+        ITERM_IGNORE_PARTIAL_BEGIN
         [searchField_ setDelegate:self];
+        ITERM_IGNORE_PARTIAL_END
         [self addSubview:searchField_];
         self.delegate = nil;
-        
+
         // Split view ------------------------------------------------------------------------------
         NSRect splitViewFrame = NSMakeRect(0,
                                            0,
@@ -98,7 +133,7 @@ const CGFloat kDefaultTagsWidth = 80;
         splitView_.autoresizesSubviews = NO;
         splitView_.delegate = self;
         [self addSubview:splitView_];
-        
+
         // Scroll view -----------------------------------------------------------------------------
         NSRect scrollViewFrame;
         scrollViewFrame.origin.x = kTagsViewWidth + kInterWidgetMargin;
@@ -107,7 +142,7 @@ const CGFloat kDefaultTagsWidth = 80;
         scrollViewFrame.size.height = splitViewFrame.size.height;
         scrollView_ = [[NSScrollView alloc] initWithFrame:scrollViewFrame];
         [scrollView_ setHasVerticalScroller:YES];
-        
+
         // Table view ------------------------------------------------------------------------------
         NSRect tableViewFrame;
         tableViewFrame.origin.x = 0;
@@ -118,10 +153,15 @@ const CGFloat kDefaultTagsWidth = 80;
                           horizontalScrollerClass:nil
                             verticalScrollerClass:[scrollView_.verticalScroller class]
                                        borderType:scrollView_.borderType
-                                      controlSize:NSRegularControlSize
+                                      controlSize:NSControlSizeRegular
                                     scrollerStyle:scrollView_.verticalScroller.scrollerStyle];
 
         tableView_ = [[ProfileTableView alloc] initWithFrame:tableViewFrame];
+
+        if (@available(macOS 10.16, *)) {
+            tableView_.style = NSTableViewStyleInset;
+        }
+
         [tableView_ setMenuHandler:self];
         [tableView_ registerForDraggedTypes:[NSArray arrayWithObject:kProfileTableViewDataType]];
         [tableView_ setSelectionHighlightStyle:NSTableViewSelectionHighlightStyleRegular];
@@ -131,7 +171,6 @@ const CGFloat kDefaultTagsWidth = 80;
         [tableView_ setAllowsEmptySelection:YES];
         [tableView_ setAllowsMultipleSelection:NO];
         [tableView_ setAllowsTypeSelect:NO];
-        [tableView_ setBackgroundColor:[NSColor whiteColor]];
 
         tableColumn_ =
             [[NSTableColumn alloc] initWithIdentifier:@"name"];
@@ -139,45 +178,75 @@ const CGFloat kDefaultTagsWidth = 80;
         [tableView_ addTableColumn:tableColumn_];
 
         [scrollView_ setDocumentView:tableView_];
-        [scrollView_ setBorderType:NSBezelBorder];
+        if (@available(macOS 10.16, *)) {
+            scrollView_.borderType = NSLineBorder;
+        } else {
+            [scrollView_ setBorderType:NSBezelBorder];
+        }
 
-        [tableView_ setDelegate:self];
-        [tableView_ setDataSource:self];
         selectedGuids_ = [[NSMutableSet alloc] init];
 
         [tableView_ setDoubleAction:@selector(onDoubleClick:)];
-        
-        NSTableHeaderView* header = [[[NSTableHeaderView alloc] init] autorelease];
-        [tableView_ setHeaderView:header];
-        [[tableColumn_ headerCell] setStringValue:@"Profile Name"];
-        
+
+        tableColumn_.title = @"Profile Name";
+
         [tableView_ sizeLastColumnToFit];
-        
+
         [searchField_ setArrowHandler:tableView_];
-        
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(reloadData)
+                                                     name:kProfileWasDeletedNotification
+                                                   object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(dataChangeNotification:)
                                                      name:kReloadAddressBookNotification
                                                    object:nil];
-        
+
         // Tags view -------------------------------------------------------------------------------
         NSRect tagsViewFrame = NSMakeRect(0, 0, kTagsViewWidth, splitViewFrame.size.height);
-        lastTagsWidth_ = kDefaultTagsWidth;
-        tagsViewIsCollapsed_ = (tagsView_.frame.size.width == 0);
+        tagsViewIsCollapsed_ = tagsViewFrame.size.width > 0;
         tagsView_ = [[[ProfileTagsView alloc] initWithFrame:tagsViewFrame] autorelease];
         tagsView_.delegate = self;
         [splitView_ addSubview:tagsView_];
         [splitView_ addSubview:scrollView_];
+
+        if (font) {
+            [self setFont:font];
+        }
+        [tableView_ setDataSource:self];
+        [tableView_ setDelegate:self];
     }
     return self;
 }
 
-- (void)dealloc
-{
+- (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_savedHeights release];
     [dataSource_ release];
     [selectedGuids_ release];
+    // These if statements are pure paranoia because this thing gets used all
+    // over the place and is pretty old.
+    if (tableView_.delegate == self) {
+        tableView_.delegate = nil;
+    }
+    if (tableView_.dataSource == self) {
+        tableView_.dataSource = nil;
+    }
+    [_font release];
     [super dealloc];
+}
+
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    DLog(@"ProfileListView: performKeyEquivalent: %@", event);
+    BOOL result = [super performKeyEquivalent:event];
+    DLog(@"ProfileListView: performKeyEquivalent: returns %@", @(result));
+    return result;
+}
+
+- (void)forceOverlayScroller {
+    scrollView_.scrollerStyle = NSScrollerStyleOverlay;
+    tagsView_.scrollView.scrollerStyle = NSScrollerStyleOverlay;
 }
 
 - (void)focusSearchField
@@ -192,22 +261,26 @@ const CGFloat kDefaultTagsWidth = 80;
 
 #pragma mark -  Drag drop
 
-- (BOOL)tableView:(NSTableView *)tv writeRowsWithIndexes:(NSIndexSet *)rowIndexes toPasteboard:(NSPasteboard*)pboard
-{
+- (id<NSPasteboardWriting>)tableView:(NSTableView *)tableView pasteboardWriterForRow:(NSInteger)row {
+    NSPasteboardItem *pbItem = [[[NSPasteboardItem alloc] init] autorelease];
+    [pbItem setData:[self dataForRow:row]
+            forType:kProfileTableViewDataType];
+    return pbItem;
+}
+
+- (NSData *)dataForRow:(NSInteger)rowIndex {
     // Copy guid to pboard
-    NSInteger rowIndex = [rowIndexes firstIndex];
-    NSMutableSet* guids = [[[NSMutableSet alloc] init] autorelease];
-    while (rowIndex != NSNotFound) {
-        Profile* profile = [dataSource_ profileAtIndex:rowIndex];
-        NSString* guid = [profile objectForKey:KEY_GUID];
+    NSMutableSet *guids = [[[NSMutableSet alloc] init] autorelease];
+    if (rowIndex != NSNotFound) {
+        Profile *profile = [dataSource_ profileAtIndex:rowIndex];
+        NSString *guid = [profile objectForKey:KEY_GUID];
         [guids addObject:guid];
-        rowIndex = [rowIndexes indexGreaterThanIndex:rowIndex];
     }
 
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:guids];
-    [pboard declareTypes:[NSArray arrayWithObject:kProfileTableViewDataType] owner:self];
-    [pboard setData:data forType:kProfileTableViewDataType];
-    return YES;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:guids
+                                         requiringSecureCoding:NO
+                                                         error:nil];
+    return data;
 }
 
 - (NSDragOperation)tableView:(NSTableView *)aTableView
@@ -238,9 +311,30 @@ const CGFloat kDefaultTagsWidth = 80;
     [[self undoManager] registerUndoWithTarget:self
                                       selector:@selector(setRowOrder:)
                                         object:[self rowOrder]];
-    NSPasteboard* pboard = [info draggingPasteboard];
-    NSData* rowData = [pboard dataForType:kProfileTableViewDataType];
-    NSSet* guids = [NSKeyedUnarchiver unarchiveObjectWithData:rowData];
+
+    NSMutableSet<NSString *> *guids = [NSMutableSet set];
+    [info enumerateDraggingItemsWithOptions:0
+                                    forView:aTableView
+                                    classes:@[ [NSPasteboardItem class]]
+                              searchOptions:@{}
+                                 usingBlock:^(NSDraggingItem * _Nonnull draggingItem, NSInteger idx, BOOL * _Nonnull stop) {
+        NSPasteboardItem *item = draggingItem.item;
+        NSData *rowData = [item dataForType:kProfileTableViewDataType];
+        NSError *error = nil;
+        NSKeyedUnarchiver *unarchiver = [[[NSKeyedUnarchiver alloc] initForReadingFromData:rowData error:&error] autorelease];
+        if (error) {
+            return;
+        }
+        NSSet<NSString *> *itemGUIDs = [unarchiver decodeObjectOfClasses:[NSSet setWithArray:@[ [NSSet class], [NSString class] ]]
+                                                                  forKey:NSKeyedArchiveRootObjectKey];
+        if (!guids) {
+            return;
+        }
+        [guids unionSet:itemGUIDs];
+    }];
+    if (!guids.count) {
+        return NO;
+    }
     NSMutableDictionary* map = [[[NSMutableDictionary alloc] init] autorelease];
 
     for (NSString* guid in guids) {
@@ -263,7 +357,7 @@ const CGFloat kDefaultTagsWidth = 80;
     // reloaded. This will cause a sync so it must be done after pushing the
     // local ordering to the underlying model.
     if ([[tableView_ sortDescriptors] count] > 0) {
-        [tableView_ setSortDescriptors:[NSArray arrayWithObjects:nil]];
+        [tableView_ setSortDescriptors:@[]];
     }
 
     // The underlying model doesn't post a change notification for each bookmark
@@ -279,14 +373,18 @@ const CGFloat kDefaultTagsWidth = 80;
     [[dataSource_ underlyingModel] rebuildMenus];
     [[dataSource_ underlyingModel] postChangeNotification];
 
+    [self selectGuids:guids];
+
+    [self reloadData];
+}
+
+- (void)selectGuids:(NSArray *)guids {
     NSMutableIndexSet* newIndexes = [[[NSMutableIndexSet alloc] init] autorelease];
     for (NSString* guid in guids) {
         int row = [dataSource_ indexOfProfileWithGuid:guid];
         [newIndexes addIndex:row];
     }
     [tableView_ selectRowIndexes:newIndexes byExtendingSelection:NO];
-
-    [self reloadData];
 }
 
 // End Drag drop -------------------------------
@@ -299,7 +397,7 @@ const CGFloat kDefaultTagsWidth = 80;
     NSString *trimmedSearchString = [[searchField_ stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     NSString *searchStringPlusTag = [NSString stringWithFormat:@"%@ tag:%@", trimmedSearchString, tag];
     [searchField_ setStringValue:[searchStringPlusTag stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];
-    [self controlTextDidChange:nil];
+    [self controlTextDidChange:[NSNotification notificationWithName:NSControlTextDidChangeNotification object:nil]];
 }
 
 - (void)_addTags:(NSArray*)tags toSearchField:(NSSearchField*)searchField
@@ -334,16 +432,16 @@ const CGFloat kDefaultTagsWidth = 80;
 }
 
 - (void)openHowToSearchHelp:(id)sender {
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://iterm2.com/search_syntax.html"]];
+    [[NSWorkspace sharedWorkspace] it_openURL:[NSURL URLWithString:@"https://iterm2.com/search_syntax.html"]
+                                       target:nil
+                                        style:iTermOpenStyleTab
+                                       window:self.window];
 }
 
-- (void)setUnderlyingDatasource:(ProfileModel*)dataSource
-{
+- (void)setUnderlyingDatasource:(ProfileModel*)dataSource {
     [dataSource_ autorelease];
-    dataSource_ = [[ProfileModelWrapper alloc] initWithModel:dataSource];
+    dataSource_ = [[ProfileModelWrapper alloc] initWithModel:dataSource profileTypes:_profileTypes];
 }
-
-
 
 - (ProfileModelWrapper*)dataSource
 {
@@ -352,6 +450,14 @@ const CGFloat kDefaultTagsWidth = 80;
 
 - (void)lockSelection {
     dataSource_.lockedGuid = [self selectedGuid];
+}
+
+- (void)selectLockedSelection {
+    NSInteger theIndex = [dataSource_ indexOfProfileWithGuid:dataSource_.lockedGuid];
+    if (theIndex < 0) {
+        return;
+    }
+    [tableView_ selectRowIndexes:[NSIndexSet indexSetWithIndex:theIndex] byExtendingSelection:NO];
 }
 
 - (void)unlockSelection {
@@ -438,7 +544,7 @@ const CGFloat kDefaultTagsWidth = 80;
     }
     if ([sortDescriptors count] > 0) {
         NSSortDescriptor* primarySortDesc = [sortDescriptors objectAtIndex:0];
-        [aTableView setIndicatorImage:([primarySortDesc ascending] ? 
+        [aTableView setIndicatorImage:([primarySortDesc ascending] ?
                                        [NSImage imageNamed:@"NSAscendingSortIndicator"] :
                                        [NSImage imageNamed:@"NSDescendingSortIndicator"])
                         inTableColumn:[aTableView tableColumnWithIdentifier:[primarySortDesc key]]];
@@ -448,26 +554,14 @@ const CGFloat kDefaultTagsWidth = 80;
 }
 
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)rowIndex {
-    NSCell *cell = [tableView preparedCellAtColumn:[[tableView tableColumns] indexOfObject:tableColumn_]
-                                               row:rowIndex];
-    NSRect constrainedBounds = NSMakeRect(0, 0, tableColumn_.width, CGFLOAT_MAX);
-    NSSize naturalSize = [cell cellSizeForBounds:constrainedBounds];
-
-    // I have no idea why I need extraHeight but maybe cellSizeForBounds: doesn't center content
-    // properly with attributed strings.
-    return naturalSize.height + [self extraHeight];
-}
-
-- (CGFloat)extraHeight {
-    if (self.mainFont.pointSize <= [NSFont smallSystemFontSize]) {
-        return 1;
-    } else {
-        return 2;
-    }
+    NSView *view = [self tableView:tableView viewForTableColumn:tableView.tableColumns[0] row:rowIndex];
+    const CGFloat height = [view fittingSize].height;
+    _savedHeights[@(rowIndex)] = @(height);
+    return height;
 }
 
 - (NSFont *)mainFont {
-    return [[tableColumn_ dataCell] font];
+    return _font ?: [NSFont systemFontOfSize:[NSFont systemFontSize]];
 }
 
 - (NSFont *)tagFont {
@@ -480,31 +574,30 @@ const CGFloat kDefaultTagsWidth = 80;
     return [NSFont systemFontOfSize:self.mainFont.pointSize - reduction];
 }
 
+- (BOOL)lightTheme {
+    return ![self.window.appearance.name isEqual:NSAppearanceNameVibrantDark];
+}
+
 - (NSAttributedString *)attributedStringForName:(NSString *)name
                                            tags:(NSArray *)tags
                                        selected:(BOOL)selected
                                       isDefault:(BOOL)isDefault
+                                      isBrowser:(BOOL)isBrowser
+                                      isDynamic:(BOOL)isDynamic
                                          filter:(NSString *)filter {
-    NSColor *textColor;
-    NSColor *tagColor;
-    NSColor *highlightedBackgroundColor;
-    if (selected) {
-        textColor = [NSColor whiteColor];
-        tagColor = [NSColor whiteColor];
-        highlightedBackgroundColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:0.4];
-    } else {
-        textColor = [NSColor blackColor];
-        tagColor = [NSColor colorWithCalibratedWhite:0.5 alpha:1];
-        highlightedBackgroundColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:0.4];
-    }
-    NSDictionary* plainAttributes = @{ NSForegroundColorAttributeName: textColor,
+    NSColor *highlightedBackgroundColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:0.4];
+
+    NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    NSDictionary* plainAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
                                        NSFontAttributeName: self.mainFont };
-    NSDictionary* highlightedNameAttributes = @{ NSForegroundColorAttributeName: textColor,
+    NSDictionary* highlightedNameAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
                                                  NSBackgroundColorAttributeName: highlightedBackgroundColor,
                                                  NSFontAttributeName: self.mainFont };
-    NSDictionary* smallAttributes = @{ NSForegroundColorAttributeName: tagColor,
+    NSDictionary* smallAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
                                        NSFontAttributeName: self.tagFont };
-    NSDictionary* highlightedSmallAttributes = @{ NSForegroundColorAttributeName: tagColor,
+    NSDictionary* highlightedSmallAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
                                                   NSBackgroundColorAttributeName: highlightedBackgroundColor,
                                                   NSFontAttributeName: self.tagFont };
     NSMutableAttributedString *theAttributedString =
@@ -513,12 +606,48 @@ const CGFloat kDefaultTagsWidth = 80;
                               defaultAttributes:plainAttributes
                           highlightedAttributes:highlightedNameAttributes] mutableCopy] autorelease];
 
-    if (isDefault) {
+    if (isDefault && !isBrowser) {
         NSAttributedString *star = [[[NSAttributedString alloc] initWithString:@"★ "
                                                                     attributes:plainAttributes] autorelease];
         [theAttributedString insertAttributedString:star atIndex:0];
     }
-
+    if (isBrowser) {
+        NSAttributedString *browserIcon;
+        if (@available(macOS 11.0, *)) {
+            NSTextAttachment *attachment = [[[NSTextAttachment alloc] init] autorelease];
+            NSString *imageName = isDefault ? SFSymbolGetString(SFSymbolSafariFill) : SFSymbolGetString(SFSymbolSafari);
+            NSImage *image = [NSImage imageWithSystemSymbolName:imageName accessibilityDescription:nil];
+            image.size = NSMakeSize(16, 16);
+            attachment.image = image;
+            NSAttributedString *safari = [NSAttributedString attributedStringWithAttachment:attachment];
+            NSAttributedString *space = [[[NSAttributedString alloc] initWithString:@" "
+                                                           attributes:plainAttributes] autorelease];
+            browserIcon = [safari attributedStringByAppendingAttributedString:space];
+            [theAttributedString insertAttributedString:browserIcon atIndex:0];
+        }
+    }
+    if (isDynamic) {
+        if (@available(macOS 12.0, *)) {
+            NSTextAttachment *attachment = [[[NSTextAttachment alloc] init] autorelease];
+            NSString *imageName = SFSymbolGetString(SFSymbolTrayAndArrowDown);
+            NSColor *color = [[NSColor labelColor] colorWithAlphaComponent:0.75];
+            NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithHierarchicalColor:color];
+            NSImage *image = [[NSImage imageWithSystemSymbolName:imageName accessibilityDescription:nil]
+                              imageWithSymbolConfiguration:config];
+            image.size = NSMakeSize(16, 16);
+            attachment.image = image;
+            NSAttributedString *dynamicIcon = [NSAttributedString attributedStringWithAttachment:attachment];
+            NSMutableAttributedString *dynamicIconWithAttr = [[dynamicIcon mutableCopy] autorelease];
+            [dynamicIconWithAttr addAttribute:iTermDynamicProfileSymbolName
+                                        value:imageName
+                                        range:NSMakeRange(0, dynamicIconWithAttr.length)];
+            NSAttributedString *space = [[[NSAttributedString alloc] initWithString:@" "
+                                                                         attributes:plainAttributes] autorelease];
+            NSMutableAttributedString *spaceWithIcon = [[[NSMutableAttributedString alloc] initWithAttributedString:space] autorelease];
+            [spaceWithIcon appendAttributedString:dynamicIconWithAttr];
+            [theAttributedString appendAttributedString:spaceWithIcon];
+        }
+    }
     if (tags.count) {
         NSAttributedString *newline = [[[NSAttributedString alloc] initWithString:@"\n"
                                                                        attributes:plainAttributes] autorelease];
@@ -541,33 +670,84 @@ const CGFloat kDefaultTagsWidth = 80;
     return theAttributedString;
 }
 
-- (NSAttributedString *)attributedStringForString:(NSString *)string selected:(BOOL)selected {
-    NSDictionary *attributes = @{ NSFontAttributeName: [NSFont systemFontOfSize:[NSFont systemFontSize]],
-                                  NSForegroundColorAttributeName: selected ? [NSColor whiteColor] : [NSColor blackColor] };
-    return [[[NSAttributedString alloc] initWithString:string attributes:attributes] autorelease];
+- (NSAttributedString *)attributedStringForCommand:(NSString *)command
+                                          selected:(BOOL)selected
+                                            filter:(NSString *)filter {
+    NSColor *highlightedBackgroundColor = [NSColor colorWithCalibratedRed:1 green:1 blue:0 alpha:0.4];
+
+    NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    NSDictionary* plainAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
+                                       NSFontAttributeName: self.mainFont };
+    NSDictionary* highlightedNameAttributes = @{ NSParagraphStyleAttributeName: paragraphStyle,
+                                                 NSBackgroundColorAttributeName: highlightedBackgroundColor,
+                                                 NSFontAttributeName: self.mainFont };
+    return [[[ProfileModel attributedStringForCommand:command
+                         highlightingMatchesForFilter:filter
+                                    defaultAttributes:plainAttributes
+                                highlightedAttributes:highlightedNameAttributes] mutableCopy] autorelease];
 }
 
-- (id)tableView:(NSTableView *)aTableView
-    objectValueForTableColumn:(NSTableColumn *)aTableColumn
-                          row:(NSInteger)rowIndex {
+- (NSAttributedString *)attributedStringForString:(NSString *)string selected:(BOOL)selected {
+    NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    NSDictionary *attributes = @{ NSFontAttributeName: [NSFont systemFontOfSize:[NSFont systemFontSize]],
+                                  NSParagraphStyleAttributeName: paragraphStyle };
+    return [[[NSAttributedString alloc] initWithString:string ?: @"" attributes:attributes] autorelease];
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    static NSString *const identifier = @"ProfileListViewIdentifier";
+    BOOL multiline = NO;
+    id value = [self stringOrAttributedStringForColumn:tableColumn row:row multiline:&multiline];
+    NSTableCellView *result;
+    if ([value isKindOfClass:[NSAttributedString class]]) {
+        result = [[tableView newTableCellViewWithTextFieldUsingIdentifier:identifier attributedString:value] autorelease];
+        result.textField.toolTip = [value string];
+    } else {
+        result = [[tableView newTableCellViewWithTextFieldUsingIdentifier:identifier font:_font string:value] autorelease];
+        result.textField.toolTip = value;
+    }
+    return result;
+}
+
+- (id)stringOrAttributedStringForColumn:(NSTableColumn *)aTableColumn
+                                    row:(NSInteger)rowIndex
+                              multiline:(BOOL *)multilinePtr {
     Profile* bookmark = [dataSource_ profileAtIndex:rowIndex];
 
+    *multilinePtr = 0;
     if (aTableColumn == tableColumn_) {
+        DLog(@"Getting name of profile at row %d. The dictionary's address is %p. Its name is %@",
+             (int)rowIndex, bookmark, bookmark[KEY_NAME]);
         Profile *defaultProfile = [[ProfileModel sharedInstance] defaultBookmark];
-        return [self attributedStringForName:bookmark[KEY_NAME]
+        Profile *defaultBrowserProfile = [[ProfileModel sharedInstance] defaultBrowserProfile];
+        *multilinePtr = [bookmark[KEY_TAGS] count] > 0;
+        return [self attributedStringForName:bookmark[KEY_NAME] ?: @""
                                         tags:bookmark[KEY_TAGS]
                                     selected:[[tableView_ selectedRowIndexes] containsIndex:rowIndex]
-                                   isDefault:[bookmark[KEY_GUID] isEqualToString:defaultProfile[KEY_GUID]]
+                                   isDefault:[bookmark[KEY_GUID] isEqualToString:defaultProfile[KEY_GUID]] || [bookmark[KEY_GUID] isEqualToString:defaultBrowserProfile[KEY_GUID]]
+                                   isBrowser:[bookmark[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeBrowserValue]
+                                   isDynamic:bookmark.profileIsDynamic
                                       filter:[searchField_ stringValue]];
     } else if (aTableColumn == commandColumn_) {
         NSString *theString = nil;
-        if (![[bookmark objectForKey:KEY_CUSTOM_COMMAND] isEqualToString:@"Yes"]) {
+        NSString *customCommand = bookmark[KEY_CUSTOM_COMMAND];
+        if ([customCommand isEqualToString:kProfilePreferenceCommandTypeCustomValue] ||
+            [customCommand isEqualToString:kProfilePreferenceCommandTypeCustomShellValue]) {
+            theString = [bookmark objectForKey:KEY_COMMAND_LINE];
+        } else if ([customCommand isEqualToString:kProfilePreferenceCommandTypeSSHValue]) {
+            theString = [NSString stringWithFormat:@"ssh %@", bookmark[KEY_COMMAND_LINE]];
+        } else if ([customCommand isEqualToString:kProfilePreferenceCommandTypeLoginShellValue]) {
             theString = @"Login shell";
-        } else {
-            theString = [bookmark objectForKey:KEY_COMMAND];
+        } else if ([customCommand isEqualToString:kProfilePreferenceCommandTypeBrowserValue]) {
+            theString = @"URL";
         }
-        return [self attributedStringForString:theString
-                                      selected:[[tableView_ selectedRowIndexes] containsIndex:rowIndex]];
+        return [self attributedStringForCommand:theString
+                                       selected:[[tableView_ selectedRowIndexes] containsIndex:rowIndex]
+                                         filter:searchField_.stringValue];
     } else if (aTableColumn == shortcutColumn_) {
         NSString* key = [bookmark objectForKey:KEY_SHORTCUT];
         if ([key length]) {
@@ -585,8 +765,7 @@ const CGFloat kDefaultTagsWidth = 80;
 }
 
 // Delegate methods
-- (void)tableView:(NSTableView *)aTableView didClickTableColumn:(NSTableColumn *)aTableColumn 
-{
+- (void)tableView:(NSTableView *)aTableView didClickTableColumn:(NSTableColumn *)aTableColumn {
     NSMutableArray* newSortDescriptors = [NSMutableArray arrayWithArray:[tableView_ sortDescriptors]];
     BOOL done = NO;
     BOOL ascending = YES;
@@ -608,7 +787,7 @@ const CGFloat kDefaultTagsWidth = 80;
     if (!done) {
         // This column was not previously sorted. Add it to the head of the array.
         [newSortDescriptors insertObject:[[[NSSortDescriptor alloc] initWithKey:[aTableColumn identifier]
-                                                                      ascending:YES] autorelease] 
+                                                                      ascending:YES] autorelease]
                                  atIndex:0];
     }
     [tableView_ setSortDescriptors:newSortDescriptors];
@@ -647,6 +826,11 @@ const CGFloat kDefaultTagsWidth = 80;
 
 - (void)tableViewSelectionDidChange:(NSNotification *)aNotification
 {
+    if (_restoringSelection) {
+        // After reloadData, setting selection back to what it was.
+        return;
+    }
+
     // There was a click on a row
     if (self.delegate && [self.delegate respondsToSelector:@selector(profileTableSelectionDidChange:)]) {
         [self.delegate profileTableSelectionDidChange:self];
@@ -659,29 +843,48 @@ const CGFloat kDefaultTagsWidth = 80;
     [self setHasSelection:[selectedGuids_ count] > 0];
 }
 
-- (int)selectedRow
-{
+- (NSInteger)selectedRow {
     return [tableView_ selectedRow];
 }
 
-- (void)reloadData
-{
+- (void)reloadData {
+    DLog(@"ProfileListView reloadData called");
     [self _addTags:[[dataSource_ underlyingModel] allTags] toSearchField:searchField_];
     [dataSource_ sync];
+    DLog(@"calling reloadData on the profile tableview");
     [tableView_ reloadData];
-    if (self.delegate && ![selectedGuids_ isEqualToSet:[self selectedGuids]]) {
-        [selectedGuids_ release];
-        selectedGuids_ = [self selectedGuids];
-        [selectedGuids_ retain];
-        if ([self.delegate respondsToSelector:@selector(profileTableSelectionDidChange:)]) {
-            [self.delegate profileTableSelectionDidChange:self];
+    NSSet *newSelectedGuids = [NSSet setWithArray:[selectedGuids_.allObjects filteredArrayUsingBlock:^BOOL(id guid) {
+        return ([dataSource_ indexOfProfileWithGuid:guid] != -1);
+    }]];
+    if (self.delegate && [selectedGuids_ isEqualToSet:newSelectedGuids]) {
+        // No change to selection. Don't tell the delegate.
+        _restoringSelection++;
+        [self selectGuids:newSelectedGuids.allObjects];
+        _restoringSelection--;
+    } else {
+        if (self.delegate && ![selectedGuids_ isEqualToSet:newSelectedGuids]) {
+            // Selection is changing.
+            [selectedGuids_ release];
+            selectedGuids_ = newSelectedGuids;
+            [selectedGuids_ retain];
+            if ([self.delegate respondsToSelector:@selector(profileTableSelectionDidChange:)]) {
+                [self.delegate profileTableSelectionDidChange:self];
+            }
         }
-    }
+
+        // Selection changed or there is no delegate.
+        [self selectGuids:newSelectedGuids.allObjects];
+     }
 }
 
-- (void)selectRowIndex:(int)theRow
-{
+- (void)selectRowIndex:(int)theRow {
+    if (theRow >= (int)tableView_.numberOfRows) {
+        return;
+    }
     NSIndexSet* indexes = [NSIndexSet indexSetWithIndex:theRow];
+    // Make sure the rowview exists so its background style can be known when
+    // the NSTableCellView is created.
+    [tableView_ rowViewAtRow:theRow makeIfNecessary:YES];
     [tableView_ selectRowIndexes:indexes byExtendingSelection:NO];
     [tableView_ scrollRowToVisible:theRow];
 }
@@ -696,8 +899,7 @@ const CGFloat kDefaultTagsWidth = 80;
     [self selectRowIndex:theRow];
 }
 
-- (int)numberOfRows
-{
+- (NSInteger)numberOfRows {
     return [dataSource_ numberOfBookmarks];
 }
 
@@ -760,6 +962,37 @@ const CGFloat kDefaultTagsWidth = 80;
     [self updateResultsForSearch];
 }
 
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (commandSelector == @selector(cancelOperation:)) {
+        if (searchField_.stringValue.length == 0) {
+            return NO;
+        }
+        searchField_.stringValue = @"";
+        dataSource_.lockedGuid = nil;
+        [self updateResultsForSearch];
+        return YES;
+    }
+    if (commandSelector == @selector(insertNewline:) &&
+        (self.numberOfRows == 1 || tableView_.selectedRow != -1) &&
+        [self.delegate respondsToSelector:@selector(profileTableRowSelected:)]) {
+        if (tableView_.selectedRow == -1) {
+            [tableView_ selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+        }
+        [self.delegate profileTableRowSelected:self];
+        return YES;
+    }
+    return NO;
+}
+
+
+- (NSArray *)control:(NSControl *)control
+            textView:(NSTextView *)textView
+         completions:(NSArray *)words
+ forPartialWordRange:(NSRange)charRange
+ indexOfSelectedItem:(NSInteger *)index {
+    return @[];
+}
+
 - (void)updateResultsForSearch
 {
     // search field changed
@@ -772,6 +1005,12 @@ const CGFloat kDefaultTagsWidth = 80;
     if ([self.delegate respondsToSelector:@selector(profileTableFilterDidChange:)]) {
         [self.delegate profileTableFilterDidChange:self];
     }
+}
+
+- (void)setProfileTypes:(ProfileType)profileTypes {
+    _profileTypes = profileTypes;
+    dataSource_.profileTypes = profileTypes;
+    [self reloadData];
 }
 
 - (void)multiColumns
@@ -787,13 +1026,13 @@ const CGFloat kDefaultTagsWidth = 80;
 
     [tableColumn_ setWidth:250];
 
-    [[shortcutColumn_ headerCell] setStringValue:@"Shortcut"];
-    [[commandColumn_ headerCell] setStringValue:@"Command"];
+    shortcutColumn_.title = @"Shortcut";
+    commandColumn_.title = @"Command";
     [tableView_ sizeLastColumnToFit];
 }
 
-- (void)dataChangeNotification:(id)sender
-{
+- (void)dataChangeNotification:(id)sender {
+    DLog(@"Scheduling a delayed perform of reloadData");
     // Use a delayed perform so the underlying model has a chance to parse its journal.
     [self performSelector:@selector(reloadData)
                withObject:nil
@@ -807,14 +1046,13 @@ const CGFloat kDefaultTagsWidth = 80;
     }
 }
 
-- (void)eraseQuery
-{
+- (void)eraseQuery {
     [searchField_ setStringValue:@""];
-    [self controlTextDidChange:nil];
+    [self controlTextDidChange:[NSNotification notificationWithName:NSControlTextDidChangeNotification
+                                                             object:nil]];
 }
 
-- (void)resizeSubviewsWithOldSize:(NSSize)oldBoundsSize
-{
+- (void)resizeSubviewsWithOldSize:(NSSize)oldBoundsSize {
     NSRect frame = [self frame];
 
     NSRect searchFieldFrame;
@@ -829,6 +1067,20 @@ const CGFloat kDefaultTagsWidth = 80;
                                        frame.size.width,
                                        frame.size.height - kSearchWidgetHeight - margin_);
     splitView_.frame = splitViewFrame;
+
+    if (tableView_.delegate && frame.size.width != oldBoundsSize.width) {
+        NSMutableIndexSet *rowsWithHeightChange = [NSMutableIndexSet indexSet];
+        for (NSInteger i = 0; i < self.numberOfRows; i++) {
+            CGFloat savedHeight = [_savedHeights[@(i)] doubleValue];
+            CGFloat height = [self tableView:tableView_ heightOfRow:i];
+            if (round(height) != round(savedHeight)) {
+                [rowsWithHeightChange addIndex:i];
+            }
+        }
+        if (rowsWithHeightChange.count > 0) {
+            [tableView_ noteHeightOfRowsWithIndexesChanged:rowsWithHeightChange];
+        }
+    }
 }
 
 - (void)turnOnDebug
@@ -844,13 +1096,13 @@ const CGFloat kDefaultTagsWidth = 80;
 
 - (void)setFont:(NSFont *)theFont
 {
-    for (NSTableColumn *col in [tableView_ tableColumns]) {
-        [[col dataCell] setFont:theFont];
-    }
+    _haveHeights = NO;
+    [_font autorelease];
+    _font = [theFont retain];
 
     if ([theFont pointSize] < 13) {
         [[searchField_ cell] setFont:theFont];
-        [[searchField_ cell] setControlSize:NSSmallControlSize];
+        [[searchField_ cell] setControlSize:NSControlSizeSmall];
         [searchField_ sizeToFit];
 
         margin_ = 5;
@@ -873,44 +1125,98 @@ const CGFloat kDefaultTagsWidth = 80;
     if (open == self.tagsVisible) {
         return;
     }
-    NSRect newTableFrame = tableView_.frame;
-    NSRect newTagsFrame = tagsView_.frame;
-    CGFloat newTagsWidth;
-    if (open) {
-        newTagsWidth = lastTagsWidth_;
-    } else {
-        lastTagsWidth_ = tagsView_.frame.size.width;
-        newTagsWidth = 0;
+
+    const CGFloat oldDividerPosition = NSWidth(tagsView_.frame);
+    if (open && NSWidth(tagsView_.frame) < 4) {
+        const CGFloat newTagsWidth = kDefaultTagsWidth;
+        if (animated) {
+            [[[[iTermSplitViewAnimation alloc] initWithSplitView:splitView_
+                                                  dividerAtIndex:0
+                                                            from:oldDividerPosition
+                                                              to:newTagsWidth
+                                                        duration:0.125
+                                                      completion:nil] autorelease] startAnimation];
+        } else {
+            [splitView_.animator setPosition:newTagsWidth ofDividerAtIndex:0];
+        }
+        tagsView_.hidden = !open;
+    } else if (!open) {
+        if (animated) {
+            [[[[iTermSplitViewAnimation alloc] initWithSplitView:splitView_
+                                                  dividerAtIndex:0
+                                                            from:oldDividerPosition
+                                                              to:0
+                                                        duration:0.125
+                                                      completion:^{
+                tagsView_.hidden = YES;
+            }] autorelease] startAnimation];
+        } else {
+            [splitView_ setPosition:0 ofDividerAtIndex:oldDividerPosition];
+            tagsView_.hidden = YES;
+        }
     }
-    newTableFrame.size.width =  self.frame.size.width - newTagsWidth;
-    newTagsFrame.size.width = newTagsWidth;
-    if (animated) {
-        [tagsView_.animator setFrame:newTagsFrame];
-        [tableView_.animator setFrame:newTableFrame];
-    } else {
-        tagsView_.frame = newTagsFrame;
-        tableView_.frame = newTableFrame;
-    }
+
 }
 
 - (BOOL)tagsVisible {
-    return tagsView_.frame.size.width > 0;
+    return !tagsView_.isHidden;
+}
+
+- (CGFloat)tagsFraction {
+    return tagsView_.frame.size.width / splitView_.frame.size.width;
+}
+
+- (void)setTagsFraction:(CGFloat)tagsFraction {
+    NSRect rect = tagsView_.frame;
+    rect.size.width = tagsFraction * splitView_.frame.size.width;
+    tagsView_.frame = rect;
+
+    rect = scrollView_.frame;
+    rect.origin.x = NSMaxX(tagsView_.frame) + splitView_.dividerThickness;
+    rect.size.width = NSWidth(splitView_.frame) - NSMinX(rect);
+    scrollView_.frame = rect;
+    
+    [splitView_ adjustSubviews];
+}
+
+- (NSDictionary *)restorableState {
+    return @{ iTermProfileListViewRestorableStateTagsVisible: @(self.tagsVisible),
+              iTermProfileListViewRestorableStateTagsFraction: @(self.tagsFraction) };
+}
+
+- (void)restoreFromState:(NSDictionary *)state {
+    if (!state) {
+        return;
+    }
+    const CGFloat fraction = [NSNumber castFrom:state[iTermProfileListViewRestorableStateTagsFraction]].doubleValue;
+    if ([state[iTermProfileListViewRestorableStateTagsVisible] boolValue] && fraction > 0 & fraction <= 1) {
+        [self setTagsOpen:YES animated:NO];
+        self.tagsFraction = fraction;
+    }
 }
 
 #pragma mark - ProfileTagsViewDelegate
 
 - (void)profileTagsViewSelectionDidChange:(ProfileTagsView *)profileTagsView {
-    searchField_.stringValue = [profileTagsView.selectedTags componentsJoinedByString:@" "];
+    searchField_.stringValue =
+        [[profileTagsView.selectedTags mapWithBlock:^id(NSString *tag) {
+            return [@"tag:" stringByAppendingString:tag];
+        }] componentsJoinedByString:@" "];
     [self updateResultsForSearch];
 }
 
 #pragma mark - NSSplitViewDelegate
 
 - (void)splitViewDidResizeSubviews:(NSNotification *)notification {
-    if ((tagsView_.frame.size.width == 0) != tagsViewIsCollapsed_ &&
+    if (!tagsViewIsCollapsed_ && NSWidth(tagsView_.frame) < 4) {
+        tagsView_.hidden = YES;
+    }
+    if (tagsView_.isHidden != tagsViewIsCollapsed_ &&
         [self.delegate respondsToSelector:@selector(profileTableTagsVisibilityDidChange:)]) {
         [self.delegate profileTableTagsVisibilityDidChange:self];
     }
-    tagsViewIsCollapsed_ = (tagsView_.frame.size.width == 0);
+    tagsViewIsCollapsed_ = (tagsView_.isHidden);
+    [self.window invalidateRestorableState];
 }
+
 @end

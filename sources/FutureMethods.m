@@ -8,17 +8,8 @@
 
 #import "FutureMethods.h"
 
-@implementation NSScreen (future)
-
-+ (BOOL)futureScreensHaveSeparateSpaces {
-    if ([self respondsToSelector:@selector(screensHaveSeparateSpaces)]) {
-        return [self screensHaveSeparateSpaces];
-    } else {
-        return NO;
-    }
-}
-
-@end
+static NSString *const kApplicationServicesFramework = @"/System/Library/Frameworks/ApplicationServices.framework";
+static NSString *const kMultitouchSupportFramework =  @"/System/Library/PrivateFrameworks/MultitouchSupport.framework";
 
 static void *GetFunctionByName(NSString *library, char *func) {
     CFBundleRef bundle;
@@ -35,54 +26,95 @@ static void *GetFunctionByName(NSString *library, char *func) {
     return f;
 }
 
+
+CPSGetCurrentProcessFunction *GetCPSGetCurrentProcessFunction(void) {
+    static dispatch_once_t onceToken;
+    static CPSGetCurrentProcessFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kApplicationServicesFramework, "CPSGetCurrentProcess");
+    });
+    return function;
+}
+
+CPSStealKeyFocusFunction *GetCPSStealKeyFocusFunction(void) {
+    static dispatch_once_t onceToken;
+    static CPSStealKeyFocusFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kApplicationServicesFramework, "CPSStealKeyFocus");
+    });
+    return function;
+}
+
+CPSReleaseKeyFocusFunction *GetCPSReleaseKeyFocusFunction(void) {
+    static dispatch_once_t onceToken;
+    static CPSReleaseKeyFocusFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kApplicationServicesFramework, "CPSReleaseKeyFocus");
+    });
+    return function;
+}
+
 CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRadiusFunction(void) {
     static BOOL tried = NO;
     static CGSSetWindowBackgroundBlurRadiusFunction *function = NULL;
     if (!tried) {
-        function  = GetFunctionByName(@"/System/Library/Frameworks/ApplicationServices.framework",
+        function  = GetFunctionByName(kApplicationServicesFramework,
                                       "CGSSetWindowBackgroundBlurRadius");
         tried = YES;
     }
     return function;
 }
 
-@implementation NSOpenPanel (Utility)
-- (NSArray *)legacyFilenames {
-    NSMutableArray *filenames = [NSMutableArray array];
-    for (NSURL *url in self.URLs) {
-        [filenames addObject:url.path];
-    }
-    return filenames;
-}
-@end
-
-@implementation NSSavePanel (Utility)
-- (NSInteger)legacyRunModalForDirectory:(NSString *)path file:(NSString *)name types:(NSArray *)fileTypes {
-    if (path) {
-        self.directoryURL = [NSURL fileURLWithPath:path];
-    }
-    if (name) {
-        self.nameFieldStringValue = name;
-    }
-    if (fileTypes) {
-        self.allowedFileTypes = fileTypes;
-    }
-    return [self runModal];
+MTActuatorCreateFromDeviceIDFunction *iTermGetMTActuatorCreateFromDeviceIDFunction(void) {
+    static dispatch_once_t onceToken;
+    static MTActuatorCreateFromDeviceIDFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kMultitouchSupportFramework,
+                                     "MTActuatorCreateFromDeviceID");
+    });
+    return function;
 }
 
-- (NSInteger)legacyRunModalForDirectory:(NSString *)path file:(NSString *)name {
-    return [self legacyRunModalForDirectory:path file:name types:nil];
+MTActuatorOpenFunction *iTermGetMTActuatorOpenFunction(void) {
+    static dispatch_once_t onceToken;
+    static MTActuatorOpenFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kMultitouchSupportFramework,
+                                     "MTActuatorOpen");
+    });
+    return function;
 }
 
-- (NSString *)legacyDirectory {
-    return [[self directoryURL] path];
+MTActuatorCloseFunction *iTermGetMTActuatorCloseFunction(void) {
+    static dispatch_once_t onceToken;
+    static MTActuatorCloseFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kMultitouchSupportFramework,
+                                     "MTActuatorClose");
+    });
+    return function;
 }
 
-- (NSString *)legacyFilename {
-    return [[self URL] path];
+MTActuatorActuateFunction *iTermGetMTActuatorActuateFunction(void) {
+    static dispatch_once_t onceToken;
+    static MTActuatorActuateFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kMultitouchSupportFramework,
+                                     "MTActuatorActuate");
+    });
+    return function;
 }
 
-@end
+MTActuatorIsOpenFunction *iTermGetMTActuatorIsOpenFunction(void) {
+    static dispatch_once_t onceToken;
+    static MTActuatorIsOpenFunction *function;
+    dispatch_once(&onceToken, ^{
+        function = GetFunctionByName(kMultitouchSupportFramework,
+                                     "MTActuatorIsOpen");
+    });
+    return function;
+}
+
 
 @implementation NSFont(Future)
 
@@ -101,3 +133,25 @@ CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRadiusFun
 }
 
 @end
+
+@implementation NSValue(Future)
+
++ (NSValue *)futureValueWithEdgeInsets:(NSEdgeInsets)edgeInsets {
+    return [[[NSValue alloc] initWithBytes:&edgeInsets objCType:@encode(NSEdgeInsets)] autorelease];
+}
+
+- (NSEdgeInsets)futureEdgeInsetsValue {
+    NSEdgeInsets edgeInsets;
+    [self getValue:&edgeInsets];
+    return edgeInsets;
+}
+
+@end
+
+#ifndef MAC_OS_VERSION_12_0
+@implementation NSProcessInfo(iTermMonterey)
+- (BOOL)isLowPowerModeEnabled {
+    return NO;
+}
+@end
+#endif  // MAC_OS_VERSION_12_0

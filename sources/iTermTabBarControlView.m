@@ -7,43 +7,58 @@
 //
 
 #import "iTermTabBarControlView.h"
+
+#import "iTerm2SharedARC-Swift.h"
 #import "iTermAdvancedSettingsModel.h"
+#import "iTermPreferences.h"
 #import "DebugLogging.h"
 #import "NSObject+iTerm.h"
 #import "NSView+iTerm.h"
+#import "NSWindow+iTerm.h"
+
+@interface NSView (Private2)
+- (NSRect)_opaqueRectForWindowMoveWhenInTitlebar;
+@end
 
 typedef NS_ENUM(NSInteger, iTermTabBarFlashState) {
     kFlashOff,
-    kFlashFadingIn,
-    kFlashHolding,
+    kFlashHolding,  // Regular delay
+    kFlashExtending,  // Staying on because cmd pressed
     kFlashFadingOut,
 };
-
-static const NSTimeInterval kAnimationDuration = 0.25;
-static const NSTimeInterval kFlashHoldTime = 1;
 
 @interface iTermTabBarControlView ()
 @property(nonatomic, assign) iTermTabBarFlashState flashState;
 @end
 
 @implementation iTermTabBarControlView {
-    BOOL _showingBecauseCmdHeld;
     iTermDelayedPerform *_flashDelayedPerform;  // weak
-    iTermDelayedPerform *_cmdPressedDelayedPerform;  // weak
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
-        [self setTabsHaveCloseButtons:![iTermAdvancedSettingsModel eliminateCloseButtons]];
+        [self setTabsHaveCloseButtons:[iTermPreferences boolForKey:kPreferenceKeyTabsHaveCloseButton]];
+        self.minimumTabDragDistance = [iTermAdvancedSettingsModel minimumTabDragDistance];
+        // This used to depend on job but it's too difficult to do now that different sessions might
+        // have different title formats.
+        self.ignoreTrailingParentheticalsForSmartTruncation = YES;
+        if (@available(macOS 26, *)) {
+            if (![iTermAdvancedSettingsModel useSequoiaStyleTabs]) {
+                self.height =  PSMTahoeTabStyle.horizontalTabBarHeight;
+            } else {
+                self.height = [iTermAdvancedSettingsModel defaultTabBarHeight];
+            }
+        } else {
+            self.height = [iTermAdvancedSettingsModel defaultTabBarHeight];
+        }
+        self.showAddTabButton = ![iTermAdvancedSettingsModel removeAddTabButton];
+        self.selectsTabsOnMouseDown = [iTermAdvancedSettingsModel selectsTabsOnMouseDown];
     }
     return self;
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
-    [[NSColor windowBackgroundColor] set];
-    NSRectFill(dirtyRect);
-
     [super drawRect:dirtyRect];
 }
 
@@ -53,25 +68,21 @@ static const NSTimeInterval kFlashHoldTime = 1;
     }
     _cmdPressed = cmdPressed;
     DLog(@"Set cmdPressed=%d", (int)cmdPressed);
-    if (cmdPressed) {
-        _cmdPressedDelayedPerform =
-                [self performBlock:^{
-                    if (_cmdPressed) {
-                        _showingBecauseCmdHeld = YES;
-                        self.flashing = YES;
-                    }
-                    if (_cmdPressedDelayedPerform.completed) {
-                        _cmdPressedDelayedPerform = nil;
-                    }
-                }
-                        afterDelay:[_itermTabBarDelegate iTermTabBarCmdPressDuration]];
-    } else {
-        _cmdPressedDelayedPerform.canceled = YES;
-        _cmdPressedDelayedPerform = nil;
-        if (_showingBecauseCmdHeld) {
-            self.flashing = NO;
-            _showingBecauseCmdHeld = NO;
-        }
+    switch (self.flashState) {
+        case kFlashOff:
+            break;
+
+        case kFlashHolding:
+            break;
+
+        case kFlashExtending:
+            if (!cmdPressed) {
+                [self setFlashing:NO];
+            }
+            break;
+
+        case kFlashFadingOut:
+            break;
     }
 }
 
@@ -79,99 +90,252 @@ static const NSTimeInterval kFlashHoldTime = 1;
     return self.flashState != kFlashOff;
 }
 
-- (void)setFlashing:(BOOL)flashing {
-    if (![_itermTabBarDelegate iTermTabBarShouldFlash]) {
-        if (!flashing && self.flashState != kFlashOff) {
-            // Quickly stop flash.
-            self.alphaValue = 1;
-            self.flashState = kFlashOff;
-            _flashDelayedPerform.canceled = YES;
-            _flashDelayedPerform = nil;
-            [_itermTabBarDelegate iTermTabBarDidFinishFlash];
+- (void)cancelFadeOut {
+    // Cancel fade out so a new timer can be started below, in case we were already holding or
+    // fading in.
+    DLog(@"Cancel fade out %@", _flashDelayedPerform);
+    _flashDelayedPerform.canceled = YES;
+    _flashDelayedPerform = nil;
+}
+
+- (void)setAlphaValue:(CGFloat)alphaValue animated:(BOOL)animated {
+    DLog(@"setAlphaValue:%@ animated:%@ (was %@) for %@\n%@",
+         @(alphaValue),
+         @(animated),
+         @(self.alphaValue),
+         self,
+         [NSThread callStackSymbols]);
+    if ([self.superview conformsToProtocol:@protocol(iTermTabBarControlViewContainer)]) {
+        if (animated) {
+            self.superview.animator.alphaValue = alphaValue;
+        } else {
+            self.superview.alphaValue = alphaValue;
         }
-        return;
+        [super setAlphaValue:1.0];
+    } else {
+        if (animated) {
+            NSView *animator = self.animator;
+            animator.alphaValue = alphaValue;
+        } else {
+            [self setAlphaValue:alphaValue];
+        }
     }
+}
 
-    if (flashing) {
-        if (self.flashState == kFlashOff || self.flashState == kFlashFadingOut) {
-            // Fade in.
-            [self retain];
-            [NSView animateWithDuration:kAnimationDuration
-                             animations:^{
-                                 self.flashState = kFlashFadingIn;
-                                 [_itermTabBarDelegate iTermTabBarWillBeginFlash];
-                                 [self.animator setAlphaValue:1];
-                             }
-                             completion:^(BOOL finished) {
-                                 if (self.flashState == kFlashFadingIn) {
-                                     self.flashState = kFlashHolding;
-                                 }
-                                 [self release];
-                             }];
+- (void)setHidden:(BOOL)hidden {
+    DLog(@"setHidden:%@ (was %@) for %@\n%@",
+         @(hidden),
+         @(self.isHidden),
+         self,
+         [NSThread callStackSymbols]);
+    if (!hidden || [self.itermTabBarDelegate iTermTabBarShouldHideBacking]) {
+        if ([self.superview conformsToProtocol:@protocol(iTermTabBarControlViewContainer)]) {
+            id<iTermTabBarControlViewContainer> container = (id<iTermTabBarControlViewContainer>)self.superview;
+            [container tabBarControlViewWillHide:hidden];
         }
+    }
+    [super setHidden:hidden];
+}
 
-        // Cancel fade out so a new timer can be started below, in case we were already holding or
-        // fading in.
-        DLog(@"Cancel dp %@", _flashDelayedPerform);
-        _flashDelayedPerform.canceled = YES;
-        _flashDelayedPerform = nil;
+- (void)setFrame:(NSRect)frame {
+    DLog(@"setFrame:%@ (was %@) for %@\n%@",
+         NSStringFromRect(frame),
+         NSStringFromRect(self.frame),
+         self,
+         [NSThread callStackSymbols]);
+    [super setFrame:frame];
+}
 
-        if (!_showingBecauseCmdHeld) {
-            // Schedule a fade out. This can be canceled.
-            [self retain];
-            _flashDelayedPerform = [NSView animateWithDuration:kAnimationDuration
-                                                         delay:kFlashHoldTime
-                                                    animations:^{
-                                                        self.flashState = kFlashFadingOut;
-                                                      [self.animator setAlphaValue:0];
+- (void)fadeIn {
+    DLog(@"fade in");
+    self.flashState = kFlashHolding;
+    [_itermTabBarDelegate iTermTabBarWillBeginFlash];
+    [self setAlphaValue:1.0 animated:NO];
+}
+
+- (void)scheduleFadeOutAfterDelay {
+    DLog(@"schedule fade out after delay");
+    // Schedule a fade out. This can be canceled.
+    [self retain];
+    __block BOOL aborted = NO;
+    _flashDelayedPerform = [NSView animateWithDuration:[iTermAdvancedSettingsModel tabFlashAnimationDuration]
+                                                 delay:[iTermAdvancedSettingsModel tabAutoShowHoldTime]
+                                            animations:^{
+                                                if (!_cmdPressed) {
+                                                    DLog(@"delayed fade out running");
+                                                    self.flashState = kFlashFadingOut;
+                                                    [self setAlphaValue:0 animated:YES];
+                                                } else {
+                                                    DLog(@"delayed fade out aborted; extending");
+                                                    self.flashState = kFlashExtending;
+                                                    aborted = YES;
+                                                }
+                                            }
+                                            completion:^(BOOL finished) {
+                                                if (!aborted) {
+                                                    DLog(@"delayed fade out completed");
+                                                    if (finished && self.flashState == kFlashFadingOut) {
+                                                        self.flashState = kFlashOff;
+                                                        [_itermTabBarDelegate iTermTabBarDidFinishFlash];
                                                     }
-                                                    completion:^(BOOL finished) {
-                                                        if (finished && self.flashState == kFlashFadingOut) {
-                                                            self.flashState = kFlashOff;
-                                                            [_itermTabBarDelegate iTermTabBarDidFinishFlash];
-                                                        }
-                                                        if (_flashDelayedPerform.completed) {
-                                                            _flashDelayedPerform = nil;
-                                                        }
-                                                        [self release];
-                                                    }];
-            DLog(@"Schedule dp %@", _flashDelayedPerform);
-        }
-    } else if (self.flashState == kFlashFadingIn || self.flashState == kFlashHolding) {
-        // Fade out (in practice, it's because cmd was released).
+                                                }
+                                                if (_flashDelayedPerform.completed) {
+                                                    _flashDelayedPerform = nil;
+                                                }
+                                                [self release];
+                                            }];
+    DLog(@"Schedule dp %@", _flashDelayedPerform);
+}
 
-        // If there is a delayed perform to fade out, cancel that so we don't try to fade out twice.
-        _flashDelayedPerform.canceled = YES;
-        _flashDelayedPerform = nil;
+- (void)stopFlashInstantly {
+    DLog(@"stop flashing instantly");
+    // Quickly stop flash.
+    [self setAlphaValue:1.0 animated:NO];
+    self.flashState = kFlashOff;
+    _flashDelayedPerform.canceled = YES;
+    _flashDelayedPerform = nil;
+    [_itermTabBarDelegate iTermTabBarDidFinishFlash];
+}
 
-        [self retain];
-        [NSView animateWithDuration:kAnimationDuration
-                         animations:^{
-                             self.flashState = kFlashFadingOut;
-                             [self.animator setAlphaValue:0];
+- (void)fadeOut {
+    DLog(@"fade out");
+    // If there is a delayed perform to fade out, cancel that so we don't try to fade out twice.
+    _flashDelayedPerform.canceled = YES;
+    _flashDelayedPerform = nil;
+
+    [self retain];
+    [NSView animateWithDuration:[iTermAdvancedSettingsModel tabFlashAnimationDuration]
+                     animations:^{
+                         self.flashState = kFlashFadingOut;
+                         [self setAlphaValue:0 animated:YES];
+                     }
+                     completion:^(BOOL finished) {
+                         if (finished && self.flashState == kFlashFadingOut) {
+                             self.flashState = kFlashOff;
+                             [_itermTabBarDelegate iTermTabBarDidFinishFlash];
                          }
-                         completion:^(BOOL finished) {
-                             if (finished && self.flashState == kFlashFadingOut) {
-                                 self.flashState = kFlashOff;
-                                 [_itermTabBarDelegate iTermTabBarDidFinishFlash];
-                             }
-                             [self release];
-                         }];
+                         [self release];
+                     }];
+}
+
+- (void)setFlashing:(BOOL)flashing {
+    flashing &= [_itermTabBarDelegate iTermTabBarShouldFlashAutomatically];
+    DLog(@"Set flashing to %d", (int)flashing);
+    if (flashing) {
+        switch (self.flashState) {
+            case kFlashOff:
+            case kFlashFadingOut:
+                [self fadeIn];
+                [self cancelFadeOut];
+                [self scheduleFadeOutAfterDelay];
+                break;
+
+            case kFlashHolding:
+                // Restart the timer.
+                [self cancelFadeOut];
+                [self scheduleFadeOutAfterDelay];
+                break;
+
+            case kFlashExtending:
+                break;
+        }
+    } else {
+        switch (self.flashState) {
+            case kFlashOff:
+                break;
+
+            case kFlashHolding:
+            case kFlashExtending:
+                [self fadeOut];
+                break;
+
+            case kFlashFadingOut:
+                [self stopFlashInstantly];
+                break;
+        }
     }
 }
 
 - (void)updateFlashing {
-    if ([self flashing] && ![_itermTabBarDelegate iTermTabBarShouldFlash]) {
-        self.flashing = NO;
+    if ([self flashing] &&
+        ![_itermTabBarDelegate iTermTabBarShouldFlashAutomatically]) {
+        [self setFlashing:NO];
     }
+}
+
+- (void)setOrientation:(PSMTabBarOrientation)orientation {
+    [super setOrientation:orientation];
+    if (@available(macOS 26, *)) {
+        self.style.orientation = self.orientation;
+        CGFloat tabBarHeight = self.style.tabBarHeight;
+        if (tabBarHeight <= 0) {
+            tabBarHeight = [self.delegate tabViewDesiredTabBarHeight:self.tabView];
+        }
+        self.height = tabBarHeight;
+    }
+    self.showAddTabButton = ![iTermAdvancedSettingsModel removeAddTabButton] && (orientation == PSMTabBarHorizontalOrientation);
 }
 
 #pragma mark - Private
 
 - (void)setFlashState:(iTermTabBarFlashState)flashState {
-    NSArray *names = @[ @"Off", @"FadeIn", @"Holding", @"FadeOut" ];
-    DLog(@"Flash state -> %@", names[flashState]);
+    NSArray *names = @[ @"Off", @"FadeIn", @"Holding", @"Extending", @"FadeOut" ];
+    DLog(@"%@ -> %@ from\n%@", names[self.flashState], names[flashState], [NSThread callStackSymbols]);
     _flashState = flashState;
+}
+
+#pragma mark - Window Dragging
+
+- (BOOL)mouseDownCanMoveWindow {
+    return [self.itermTabBarDelegate iTermTabBarCanDragWindow] ? NO : [super mouseDownCanMoveWindow];
+}
+
+- (NSRect)_opaqueRectForWindowMoveWhenInTitlebar {
+    return [self.itermTabBarDelegate iTermTabBarCanDragWindow] ? self.bounds : [super _opaqueRectForWindowMoveWhenInTitlebar];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    if (![self.itermTabBarDelegate iTermTabBarCanDragWindow]) {
+        [super mouseDown:event];
+        return;
+    }
+
+    NSView *superview = [self superview];
+    NSPoint hitLocation = [[superview superview] convertPoint:[event locationInWindow]
+                                                     fromView:nil];
+    NSView *hitView = [superview hitTest:hitLocation];
+
+    NSPoint pointInView = [self convertPoint:event.locationInWindow fromView:nil];
+    const BOOL handleDrag = ([self.itermTabBarDelegate iTermTabBarCanDragWindow] &&
+                             ![self wantsMouseDownAtPoint:pointInView] &&
+                             hitView == self &&
+                             ![self.itermTabBarDelegate iTermTabBarWindowIsFullScreen]);
+    if (handleDrag) {
+        [self.window orderFrontRegardless];
+        [self.window performWindowDragWithEvent:event];
+        return;
+    }
+    
+    [super mouseDown:event];
+}
+
+- (BOOL)clickedInCell:(NSEvent *)event {
+    const NSPoint clickPoint = [self convertPoint:event.locationInWindow
+                                         fromView:nil];
+    NSRect cellFrame;
+    PSMTabBarCell *const cell = [self cellForPoint:clickPoint
+                                         cellFrame:&cellFrame];
+    return cell != nil;
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    if (event.clickCount == 2 &&
+        [self.itermTabBarDelegate iTermTabBarCanDragWindow] &&
+        ![self clickedInCell:event]) {
+        [self.window it_titleBarDoubleClick];
+        return;
+    }
+    [super mouseUp:event];
 }
 
 @end

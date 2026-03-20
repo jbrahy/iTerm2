@@ -6,9 +6,10 @@
 //
 
 #import "BounceTrigger.h"
+#import "iTerm2SharedARC-Swift.h"
 
 // How to bounce. The parameter takes an integer value equal to one of these. This is the tag.
-enum {
+typedef NS_ENUM(int, BounceTriggerParamTag) {
     kBounceTriggerParamTagBounceUntilFocus,
     kBounceTriggerParamTagBounceOnce,
 };
@@ -18,6 +19,10 @@ enum {
 + (NSString *)title
 {
     return @"Bounce Dock Icon";
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"Bounce dock icon %@", self.bounceType == NSCriticalRequest ? @"until focused" : @"once"];
 }
 
 - (NSString *)paramPlaceholder
@@ -35,11 +40,20 @@ enum {
     return YES;
 }
 
-- (int)indexOfTag:(int)theTag
-{
+- (BOOL)isIdempotent {
+    return YES;
+}
+
+- (NSSet<NSNumber *> *)allowedMatchTypes {
+    NSMutableSet *set = [NSMutableSet setWithObject:@(iTermTriggerMatchTypeRegex)];
+    [set unionSet:[iTermEventTriggerMatchTypeHelper allEventTypesSet]];
+    return set;
+}
+
+- (NSInteger)indexForObject:(id)object {
     int i = 0;
     for (NSNumber *n in [self objectsSortedByValueInDict:[self menuItemsForPoupupButton]]) {
-        if ([n intValue] == theTag) {
+        if ([n isEqual:object]) {
             return i;
         }
         i++;
@@ -47,23 +61,32 @@ enum {
     return -1;
 }
 
-- (int)tagAtIndex:(int)index
-{
+- (id)objectAtIndex:(NSInteger)index {
     int i = 0;
 
     for (NSNumber *n in [self objectsSortedByValueInDict:[self menuItemsForPoupupButton]]) {
         if (i == index) {
-            return [n intValue];
+            return n;
         }
         i++;
     }
-    return -1;
+    return nil;
+}
+
++ (NSString *)stringForParameter:(BounceTriggerParamTag)parameter {
+    switch (parameter) {
+        case kBounceTriggerParamTagBounceUntilFocus:
+            return @"Bounce Until Activated";
+        case kBounceTriggerParamTagBounceOnce:
+            return @"Bounce Once";
+    }
+    return @"Bounce Until Activated";
 }
 
 - (NSDictionary *)menuItemsForPoupupButton
 {
-    return @{ @(kBounceTriggerParamTagBounceUntilFocus): @"Bounce Until Activated",
-              @(kBounceTriggerParamTagBounceOnce): @"Bounce Once" };
+    return @{ @(kBounceTriggerParamTagBounceUntilFocus): [BounceTrigger stringForParameter:kBounceTriggerParamTagBounceUntilFocus],
+              @(kBounceTriggerParamTagBounceOnce): [BounceTrigger stringForParameter:kBounceTriggerParamTagBounceOnce] };
 }
 
 - (NSRequestUserAttentionType)bounceType
@@ -80,19 +103,27 @@ enum {
     }
 }
 
-- (BOOL)performActionWithCapturedStrings:(NSString *const *)capturedStrings
+- (BOOL)performActionWithCapturedStrings:(NSArray<NSString *> *)stringArray
                           capturedRanges:(const NSRange *)capturedRanges
-                            captureCount:(NSInteger)captureCount
-                               inSession:(PTYSession *)aSession
+                               inSession:(id<iTermTriggerSession>)aSession
                                 onString:(iTermStringLine *)stringLine
                     atAbsoluteLineNumber:(long long)lineNumber
+                        useInterpolation:(BOOL)useInterpolation
                                     stop:(BOOL *)stop {
-    [NSApp requestUserAttention:[self bounceType]];
+    const NSRequestUserAttentionType bounceType = [self bounceType];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp requestUserAttention:bounceType];
+    });
     return YES;
 }
 
 - (int)defaultIndex {
-    return [self indexOfTag:kBounceTriggerParamTagBounceUntilFocus];
+    return [self indexForObject:@(kBounceTriggerParamTagBounceUntilFocus)];
+}
+
+- (NSAttributedString *)paramAttributedString {
+    return [[NSAttributedString alloc] initWithString:[BounceTrigger stringForParameter:[[NSNumber castFrom:self.param] intValue]]
+                                           attributes:self.regularAttributes];
 }
 
 @end

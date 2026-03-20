@@ -7,23 +7,31 @@
 //
 
 #import <Foundation/Foundation.h>
-#import "Popup.h"
+#import "iTermPopupWindowController.h"
 #import "PopupEntry.h"
 
-@class VT100RemoteHost;
+@protocol VT100RemoteHostReading;
 
 @interface CommandHistoryPopupEntry : PopupEntry
 @property(nonatomic, copy) NSString *command;
 @property(nonatomic, retain) NSDate *date;
 @end
 
-@interface CommandHistoryPopupWindowController : Popup
+@interface CommandHistoryPopupWindowController : iTermPopupWindowController
 
-- (NSArray *)commandsForHost:(VT100RemoteHost *)host
+@property (nonatomic) BOOL forwardKeyDown;
+
+- (instancetype)initForAutoComplete:(BOOL)autocomplete;
+- (instancetype)init NS_UNAVAILABLE;
+
+// Returns uses if expand is NO or entries if it is YES.
+- (NSArray *)commandsForHost:(id<VT100RemoteHostReading>)host
               partialCommand:(NSString *)partialCommand
                       expand:(BOOL)expand;
 
 
-- (void)loadCommands:(NSArray *)commands partialCommand:(NSString *)partialCommand;
+- (void)loadCommands:(NSArray *)commands
+      partialCommand:(NSString *)partialCommand
+ sortChronologically:(BOOL)sortChronologically;
 
 @end

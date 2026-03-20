@@ -10,7 +10,7 @@
  **
  **  Project: iTerm
  **
- **  Description: overrides sendEvent: so that key mappings with command mask  
+ **  Description: overrides sendEvent: so that key mappings with command mask
  **               are handled properly.
  **
  **  This program is free software; you can redistribute it and/or modify
@@ -29,15 +29,64 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import "PTYWindow.h"
+
+// Used for keys you can press on the touch bar that have no equivalent on physical keyboards that Apple recognizes
+extern unsigned short iTermBogusVirtualKeyCode;
+
+// Notifications posted when the character panel opens/closes. A pile of hacks.
+extern NSString *const iTermApplicationCharacterPaletteWillOpen;
+extern NSString *const iTermApplicationCharacterPaletteDidClose;
+extern NSString *const iTermApplicationInputMethodEditorDidOpen;
+extern NSString *const iTermApplicationInputMethodEditorDidClose;
+
+extern NSString *const iTermApplicationWillShowModalWindow;
+extern NSString *const iTermApplicationDidCloseModalWindow;
+extern NSNotificationName const iTermApplicationCharacterAccentMenuVisibilityDidChange;
 
 @class iTermApplicationDelegate;
+@class iTermScriptingWindow;
+
+@protocol iTermApplicationDelegate<NSApplicationDelegate>
+- (NSMenu *)statusBarMenu;
+- (BOOL)handleInternalURL:(NSURL *)url;
+@end
 
 @interface iTermApplication : NSApplication
 
++ (iTermApplication *)sharedApplication;
+
+- (NSArray<NSWindow *> *)orderedWindowsPlusVisibleHotkeyPanels;
+- (NSArray<NSWindow *> *)orderedWindowsPlusAllHotkeyPanels;
+
 // Sets the return value for -currentEvent. Only for testing.
 @property(atomic, retain) NSEvent *fakeCurrentEvent;
+@property(nonatomic, readonly) NSStatusItem *statusBarItem;
+@property(nonatomic) BOOL isUIElement;
+@property(nonatomic) BOOL localAuthenticationDialogOpen;
+@property(nonatomic) BOOL it_characterPanelIsOpen;
+@property(nonatomic, readonly) BOOL it_modalWindowOpen;
+@property(nonatomic, readonly) BOOL it_imeOpen;
+@property(nonatomic, readonly) NSWindow *it_windowBecomingKey;
+@property(nonatomic, readonly) BOOL it_justBecameActive;
+@property(nonatomic) BOOL it_restorableStateInvalid;
+@property(nonatomic, readonly) NSEventModifierFlags it_modifierFlags;
+@property(nonatomic, readonly) BOOL it_accentMenuOpen;
+
+// In big sur, sheets aren't key windows any more. This finds the current sheet for the key window and returns it.
+@property(nonatomic, readonly) NSWindow *it_keyWindow;
+@property(nonatomic, readonly) NSArray<NSWindow *> *it_windowsWithSheetModals;
 
 - (void)sendEvent:(NSEvent *)anEvent;
-- (iTermApplicationDelegate *)delegate;
+- (iTermApplicationDelegate<iTermApplicationDelegate> *)delegate;
+- (BOOL)routeEventToShortcutInputView:(NSEvent *)event;
+
+// Like orderedWindows, but only iTermWindow/iTermPanel objects wrapped in iTermScriptingWindow*s are returned.
+- (NSArray<iTermScriptingWindow *> *)orderedScriptingWindows;
+
+- (void)activateAppWithCompletion:(void (^)(void))completion;
+- (void)it_makeWindowKey:(NSWindow *)window;
+- (void)updateAppearance;
+- (BOOL)it_functionPressed;
 
 @end

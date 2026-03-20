@@ -7,6 +7,7 @@
 
 #import "SendTextTrigger.h"
 #import "PTYSession.h"
+#import "iTerm2SharedARC-Swift.h"
 
 @implementation SendTextTrigger
 
@@ -15,27 +16,45 @@
     return @"Send Text…";
 }
 
+- (NSString *)description {
+    return [NSString stringWithFormat:@"Send text “%@”", self.param];
+}
+
 - (BOOL)takesParameter
 {
     return YES;
 }
 
-- (NSString *)paramPlaceholder
-{
+- (NSString *)triggerOptionalParameterPlaceholderWithInterpolation:(BOOL)interpolation {
     return @"Enter text to send";
 }
 
+// Requires a live session to send text to
+- (NSSet<NSNumber *> *)allowedMatchTypes {
+    NSMutableSet *set = [NSMutableSet setWithObject:@(iTermTriggerMatchTypeRegex)];
+    [set unionSet:[iTermEventTriggerMatchTypeHelper allEventTypesExceptSessionEndedSet]];
+    return set;
+}
 
-- (BOOL)performActionWithCapturedStrings:(NSString *const *)capturedStrings
+
+- (BOOL)performActionWithCapturedStrings:(NSArray<NSString *> *)stringArray
                           capturedRanges:(const NSRange *)capturedRanges
-                            captureCount:(NSInteger)captureCount
-                               inSession:(PTYSession *)aSession
+                               inSession:(id<iTermTriggerSession>)aSession
                                 onString:(iTermStringLine *)stringLine
                     atAbsoluteLineNumber:(long long)lineNumber
+                        useInterpolation:(BOOL)useInterpolation
                                     stop:(BOOL *)stop {
-    NSString *message = [self paramWithBackreferencesReplacedWithValues:capturedStrings
-                                                                  count:captureCount];
-    [aSession writeTask:[message dataUsingEncoding:NSUTF8StringEncoding]];
+    // Need to stop the world to get scope, provided it is needed. This will be a modest performance issue at most.
+    id<iTermTriggerScopeProvider> scopeProvider = [aSession triggerSessionVariableScopeProvider:self];
+    id<iTermTriggerCallbackScheduler> scheduler = [scopeProvider triggerCallbackScheduler];
+    [[self paramWithBackreferencesReplacedWithValues:stringArray
+                                             absLine:lineNumber
+                                               scope:scopeProvider
+                                    useInterpolation:useInterpolation] then:^(NSString * _Nonnull message) {
+        [scheduler scheduleTriggerCallback:^{
+            [aSession triggerSession:self writeText:message];
+        }];
+    }];
     return YES;
 }
 

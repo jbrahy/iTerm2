@@ -9,11 +9,8 @@
 #import <Cocoa/Cocoa.h>
 
 @interface PSMRolloverButton : NSButton
-{
-    NSImage             *_rolloverImage;
-    NSImage             *_usualImage;
-    NSTrackingRectTag   _myTrackingRectTag;
-}
+
+@property (nonatomic) BOOL allowDrags;
 
 // the regular image
 - (void)setUsualImage:(NSImage *)newImage;
@@ -23,7 +20,12 @@
 - (void)setRolloverImage:(NSImage *)newImage;
 - (NSImage *)rolloverImage;
 
-// tracking rect for mouse events
-- (void)addTrackingRect;
-- (void)removeTrackingRect;
 @end
+
+NS_AVAILABLE_MAC(26)
+@interface PSMTahoeRolloverButton: PSMRolloverButton
+
+- (instancetype)initWithSymbolName:(NSString *)name;
+
+@end
+

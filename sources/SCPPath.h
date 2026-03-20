@@ -12,4 +12,9 @@
 @property(nonatomic, copy) NSString *path;
 @property(nonatomic, copy) NSString *hostname;
 @property(nonatomic, copy) NSString *username;
+@property(nonatomic, readonly) NSString *usernameHostnameString;
+
+- (NSString *)stringValue;
+- (NSURL *)URL;
+
 @end

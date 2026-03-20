@@ -7,34 +7,51 @@
 //
 
 #import "ToolDirectoriesView.h"
+#import "SFSymbolEnum/SFSymbolEnum.h"
 
-#import "iTermDirectoriesModel.h"
+#import "iTerm2SharedARC-Swift.h"
+#import "iTermApplication.h"
+#import "iTermCompetentTableRowView.h"
+#import "iTermRecentDirectoryMO.h"
+#import "iTermRecentDirectoryMO+Additions.h"
 #import "iTermSearchField.h"
+#import "iTermShellHistoryController.h"
 #import "iTermToolWrapper.h"
 #import "NSDateFormatterExtras.h"
+#import "NSEvent+iTerm.h"
+#import "NSFont+iTerm.h"
+#import "NSImage+iTerm.h"
+#import "NSStringITerm.h"
 #import "NSTableColumn+iTerm.h"
+#import "NSTableView+iTerm.h"
+#import "NSTextField+iTerm.h"
+#import "NSWindow+iTerm.h"
+#import "NSWorkspace+iTerm.h"
+#import "PseudoTerminal.h"
 #import "PTYSession.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kButtonHeight = 23;
 static const CGFloat kMargin = 5;
 static const CGFloat kHelpMargin = 5;
 
+@interface ToolDirectoriesView() <NSSearchFieldDelegate, NSMenuItemValidation>
+@end
+
 @implementation ToolDirectoriesView {
-    NSScrollView *scrollView_;
-    NSTableView *tableView_;
+    NSScrollView *_scrollView;
+    NSTableView *_tableView;
     NSButton *clear_;
     BOOL shutdown_;
-    NSArray *entries_;
-    NSArray *filteredEntries_;
+    NSArray<iTermRecentDirectoryMO *> *entries_;
+    NSArray<iTermRecentDirectoryMO *> *filteredEntries_;
     iTermSearchField *searchField_;
     NSFont *boldFont_;
     NSMenu *menu_;
     NSButton *help_;
 }
 
-@synthesize tableView = tableView_;
-
-- (id)initWithFrame:(NSRect)frame {
+- (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         searchField_ = [[iTermSearchField alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, 1)];
@@ -45,9 +62,12 @@ static const CGFloat kHelpMargin = 5;
         [self addSubview:searchField_];
 
         help_ = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
-        [help_ setBezelStyle:NSHelpButtonBezelStyle];
-        [help_ setButtonType:NSMomentaryPushInButton];
+        [help_ setBezelStyle:NSBezelStyleHelpButton];
+        [help_ setButtonType:NSButtonTypeMomentaryPushIn];
         [help_ setBordered:YES];
+        if (@available(macOS 10.16, *)) {
+            help_.controlSize = NSControlSizeSmall;
+        }
         [help_ sizeToFit];
         help_.target = self;
         help_.action = @selector(help:);
@@ -56,61 +76,42 @@ static const CGFloat kHelpMargin = 5;
         [self addSubview:help_];
 
         clear_ = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
-        [clear_ setButtonType:NSMomentaryPushInButton];
-        [clear_ setTitle:@"Clear All"];
+        if (@available(macOS 10.16, *)) {
+            clear_.bezelStyle = NSBezelStyleRegularSquare;
+            clear_.bordered = NO;
+            clear_.image = [NSImage it_imageForSymbolName:SFSymbolGetString(SFSymbolTrash) accessibilityDescription:@"Clear"];
+            clear_.imagePosition = NSImageOnly;
+            clear_.frame = NSMakeRect(0, 0, 22, 22);
+        } else {
+            [clear_ setButtonType:NSButtonTypeMomentaryPushIn];
+            [clear_ setTitle:@"Clear All"];
+            [clear_ setBezelStyle:NSBezelStyleSmallSquare];
+            [clear_ sizeToFit];
+        }
         [clear_ setTarget:self];
         [clear_ setAction:@selector(clear:)];
-        [clear_ setBezelStyle:NSSmallSquareBezelStyle];
-        [clear_ sizeToFit];
         [clear_ setAutoresizingMask:NSViewMinYMargin | NSViewMinXMargin];
         [self addSubview:clear_];
-        [clear_ release];
 
-        scrollView_ = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
-        [scrollView_ setHasVerticalScroller:YES];
-        [scrollView_ setHasHorizontalScroller:NO];
-        [scrollView_ setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-        [scrollView_ setBorderType:NSBezelBorder];
+        _scrollView = [NSScrollView scrollViewWithTableViewForToolbeltWithContainer:self
+                                                                             insets:NSEdgeInsetsZero
+                                                                          rowHeight:[NSTableView heightForTextCellUsingFont:[NSFont it_toolbeltFont]]
+                                                                  keyboardNavigable:NO];
+        _tableView = _scrollView.documentView;
+        NSCell *dataCell = _tableView.tableColumns[0].dataCell;
+        dataCell.font = [NSFont it_toolbeltFont];
+        [_tableView setDoubleAction:@selector(doubleClickOnTableView:)];
+        [searchField_ setArrowHandler:_tableView];
 
-        tableView_ = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
-        NSTableColumn *col;
-        col = [[[NSTableColumn alloc] initWithIdentifier:@"directories"] autorelease];
-        [col setEditable:NO];
-        [tableView_ addTableColumn:col];
-        [[col headerCell] setStringValue:@"Directories"];
-        NSFont *theFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-        [[col dataCell] setFont:theFont];
-        tableView_.rowHeight = col.suggestedRowHeight;
-        [tableView_ setHeaderView:nil];
-        [tableView_ setDataSource:self];
-        [tableView_ setDelegate:self];
-
-        [tableView_ setDoubleAction:@selector(doubleClickOnTableView:)];
-        [tableView_ setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-
-        [searchField_ setArrowHandler:tableView_];
-
-        [scrollView_ setDocumentView:tableView_];
-        [self addSubview:scrollView_];
-
-        [tableView_ sizeToFit];
-        [tableView_ setColumnAutoresizingStyle:NSTableViewSequentialColumnAutoresizingStyle];
-
-        tableView_.menu = [[[NSMenu alloc] init] autorelease];
-        tableView_.menu.delegate = self;
+        _tableView.menu = [[NSMenu alloc] init];
+        _tableView.menu.delegate = self;
         NSMenuItem *item;
         item = [[NSMenuItem alloc] initWithTitle:@"Toggle Star"
                                           action:@selector(toggleStar:)
                                    keyEquivalent:@""];
-        [tableView_.menu addItem:item];
+        [_tableView.menu addItem:item];
 
-        // Save the bold version of the table's default font
-        NSFontManager *fontManager = [NSFontManager sharedFontManager];
-        NSFont *font = [[col dataCell] font];
-        boldFont_ = [[fontManager fontWithFamily:font.familyName
-                                          traits:NSBoldFontMask
-                                          weight:0
-                                            size:font.pointSize] retain];
+        boldFont_ = [[NSFontManager sharedFontManager] convertFont:[NSFont it_toolbeltFont] toHaveTrait:NSFontBoldTrait];
 
         [self relayout];
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -118,16 +119,16 @@ static const CGFloat kHelpMargin = 5;
                                                      name:kDirectoriesDidChangeNotificationName
                                                    object:nil];
         [self performSelector:@selector(updateDirectories) withObject:nil afterDelay:0];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(windowAppearanceDidChange:)
+                                                     name:iTermWindowAppearanceDidChange
+                                                   object:nil];
     }
     return self;
 }
 
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [tableView_ release];
-    [scrollView_ release];
-    [boldFont_ release];
-    [super dealloc];
++ (ProfileType)supportedProfileTypes {
+    return ProfileTypeTerminal;
 }
 
 - (void)shutdown {
@@ -136,13 +137,78 @@ static const CGFloat kHelpMargin = 5;
 }
 
 - (NSSize)contentSize {
-    NSSize size = [scrollView_ contentSize];
-    size.height = [[tableView_ headerView] frame].size.height;
-    size.height += [tableView_ numberOfRows] * ([tableView_ rowHeight] + [tableView_ intercellSpacing].height);
+    NSSize size = [_scrollView contentSize];
+    size.height = _tableView.intrinsicContentSize.height;
     return size;
 }
 
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    [self relayout];
+}
+
 - (void)relayout {
+    if (@available(macOS 10.16, *)) {
+        [self relayout_bigSur];
+    } else {
+        [self relayout_legacy];
+    }
+}
+
+- (void)relayout_bigSur {
+    NSRect frame = self.frame;
+
+    // Search field
+    NSRect searchFieldFrame = NSMakeRect(0,
+                                         0,
+                                         frame.size.width - help_.frame.size.width - clear_.frame.size.width - 2 * kMargin,
+                                         searchField_.frame.size.height);
+    searchField_.frame = searchFieldFrame;
+
+    // Help button
+    {
+        CGFloat fudgeFactor = 1;
+        if (@available(macOS 10.16, *)) {
+            fudgeFactor = 2;
+        }
+        help_.frame = NSMakeRect(frame.size.width - help_.frame.size.width,
+                                 fudgeFactor,
+                                 help_.frame.size.width,
+                                 help_.frame.size.height);
+    }
+
+    // Clear button
+    {
+        CGFloat fudgeFactor = 1;
+        if (@available(macOS 10.16, *)) {
+            fudgeFactor = 0;
+        }
+        clear_.frame = NSMakeRect(help_.frame.origin.x - clear_.frame.size.width - kMargin,
+                                  fudgeFactor,
+                                  clear_.frame.size.width,
+                                  clear_.frame.size.height);
+    }
+    
+    // Scroll view
+    [_scrollView setFrame:NSMakeRect(0,
+                                     searchFieldFrame.size.height + kMargin,
+                                     frame.size.width,
+                                     frame.size.height - searchFieldFrame.size.height - 2 * kMargin)];
+
+    // Table view
+    NSSize contentSize = [_scrollView contentSize];
+    NSTableColumn *column = _tableView.tableColumns[0];
+    CGFloat fudgeFactor = 0;
+    if (@available(macOS 10.16, *)) {
+        fudgeFactor = 32;
+    }
+    column.minWidth = contentSize.width - fudgeFactor;
+    column.maxWidth = contentSize.width - fudgeFactor;
+    [_tableView sizeToFit];
+    [_tableView reloadData];
+}
+
+- (void)relayout_legacy {
     NSRect frame = self.frame;
     searchField_.frame = NSMakeRect(0, 0, frame.size.width, searchField_.frame.size.height);
     help_.frame = NSMakeRect(frame.size.width - help_.frame.size.width,
@@ -150,12 +216,12 @@ static const CGFloat kHelpMargin = 5;
                              help_.frame.size.width,
                              help_.frame.size.height);
     [clear_ setFrame:NSMakeRect(0, frame.size.height - kButtonHeight, frame.size.width - help_.frame.size.width - kHelpMargin, kButtonHeight)];
-    scrollView_.frame = NSMakeRect(0,
+    _scrollView.frame = NSMakeRect(0,
                                    searchField_.frame.size.height + kMargin,
                                    frame.size.width,
                                    frame.size.height - kButtonHeight - 2 * kMargin - searchField_.frame.size.height);
     NSSize contentSize = [self contentSize];
-    [tableView_ setFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
+    [_tableView setFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
 }
 
 - (BOOL)isFlipped {
@@ -166,21 +232,35 @@ static const CGFloat kHelpMargin = 5;
     return filteredEntries_.count;
 }
 
-- (NSString *)tableView:(NSTableView *)tableView
-         toolTipForCell:(NSCell *)cell
-                   rect:(NSRectPointer)rect
-            tableColumn:(NSTableColumn *)tableColumn
-                    row:(NSInteger)row
-          mouseLocation:(NSPoint)mouseLocation {
-    iTermDirectoryEntry *entry = filteredEntries_[row];
-    return entry.path;
+- (NSView *)tableView:(NSTableView *)tableView
+   viewForTableColumn:(NSTableColumn *)tableColumn
+                  row:(NSInteger)row {
+    static NSString *const identifier = @"ToolDirectoriesViewEntry";
+    id value = [self stringOrAttributedStringForColumn:tableColumn row:row];
+    iTermRecentDirectoryMO *entry = filteredEntries_[row];
+    NSTableCellView *cell = [tableView newTableCellViewWithTextFieldUsingIdentifier:identifier
+                                                                               font:[NSFont it_toolbeltFont]
+                                                                              value:value];
+    NSString *tooltip = entry.path;
+    cell.toolTip = tooltip;
+
+    return cell;
 }
 
-- (id)tableView:(NSTableView *)aTableView
-    objectValueForTableColumn:(NSTableColumn *)aTableColumn
-            row:(NSInteger)rowIndex {
-    iTermDirectoryEntry *entry = filteredEntries_[rowIndex];
-    return [entry attributedStringForTableColumn:aTableColumn];
+- (id <NSPasteboardWriting>)tableView:(NSTableView *)tableView pasteboardWriterForRow:(NSInteger)row {
+    NSPasteboardItem *pbItem = [[NSPasteboardItem alloc] init];
+    iTermRecentDirectoryMO *entry = filteredEntries_[row];
+    [pbItem setString:entry.path forType:UTTypeUTF8PlainText.identifier];
+    return pbItem;
+}
+
+- (id)stringOrAttributedStringForColumn:(NSTableColumn *)aTableColumn
+                                    row:(NSInteger)rowIndex {
+    iTermRecentDirectoryMO *entry = filteredEntries_[rowIndex];
+    NSIndexSet *indexes =
+        [[iTermShellHistoryController sharedInstance] abbreviationSafeIndexesInRecentDirectory:entry];
+    return [entry attributedStringForTableColumn:aTableColumn
+                      abbreviationSafeComponents:indexes];
 }
 
 - (void)directoriesDidChange:(id)sender {
@@ -188,21 +268,22 @@ static const CGFloat kHelpMargin = 5;
 }
 
 - (void)updateDirectories {
-    [entries_ autorelease];
+    entries_ = nil;
     iTermToolWrapper *wrapper = self.toolWrapper;
-    VT100RemoteHost *host = [wrapper.delegate.delegate toolbeltCurrentHost];
-    NSArray *entries = [[iTermDirectoriesModel sharedInstance] entriesSortedByScoreOnHost:host];
-    NSArray *reversed = [[entries reverseObjectEnumerator] allObjects];
-    entries_ = [reversed retain];
-    [tableView_ reloadData];
+    id<VT100RemoteHostReading> host = [wrapper.delegate.delegate toolbeltCurrentHost];
+    NSArray<iTermRecentDirectoryMO *> *entries =
+        [[iTermShellHistoryController sharedInstance] directoriesSortedByScoreOnHost:host];
+    NSArray<iTermRecentDirectoryMO *> *reversed = [[entries reverseObjectEnumerator] allObjects];
+    entries_ = reversed;
+    [_tableView reloadData];
 
     [self computeFilteredEntries];
     // Updating the table data causes the cursor to change into an arrow!
     [self performSelector:@selector(fixCursor) withObject:nil afterDelay:0];
 
-    NSResponder *firstResponder = [[tableView_ window] firstResponder];
-    if (firstResponder != tableView_) {
-        [tableView_ scrollToEndOfDocument:nil];
+    NSResponder *firstResponder = [[_tableView window] firstResponder];
+    if (firstResponder != _tableView) {
+        [_tableView scrollToEndOfDocument:nil];
     }
 }
 
@@ -215,50 +296,62 @@ static const CGFloat kHelpMargin = 5;
 }
 
 - (void)doubleClickOnTableView:(id)sender {
-    NSInteger selectedIndex = [tableView_ selectedRow];
+    NSInteger selectedIndex = [_tableView selectedRow];
     if (selectedIndex < 0) {
         return;
     }
-    iTermDirectoryEntry* entry = filteredEntries_[selectedIndex];
+    iTermRecentDirectoryMO *entry = filteredEntries_[selectedIndex];
     iTermToolWrapper *wrapper = self.toolWrapper;
     NSString *text;
-    if ([NSEvent modifierFlags] & NSAlternateKeyMask) {
-        text = [@"cd " stringByAppendingString:entry.path];
+    NSString *escapedPath = [entry.path stringWithEscapedShellCharactersIncludingNewlines:YES];
+    if ([NSEvent modifierFlags] & NSEventModifierFlagOption) {
+        text = [@"cd " stringByAppendingString:escapedPath];
     } else {
-        text = entry.path;
+        text = escapedPath;
+    }
+    if (([[iTermApplication sharedApplication] it_modifierFlags] & NSEventModifierFlagShift)) {
+        text = [text stringByAppendingString:@"\n"];
     }
     [wrapper.delegate.delegate toolbeltInsertText:text];
 }
 
 - (void)clear:(id)sender {
-    if (NSRunAlertPanel(@"Erase Saved Directories",
-                        @"Saved directories for all hosts will be erased. Continue?",
-                        @"OK",
-                        @"Cancel",
-                        nil) == NSAlertDefaultReturn) {
-        [[iTermDirectoriesModel sharedInstance] eraseHistory];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Erase Saved Directories?";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [[iTermShellHistoryController sharedInstance] eraseCommandHistory:NO directories:YES];
     }
 }
 
 - (void)computeFilteredEntries {
-    [filteredEntries_ release];
+    filteredEntries_ = nil;
     if (searchField_.stringValue.length == 0) {
-        filteredEntries_ = [entries_ retain];
+        filteredEntries_ = entries_;
     } else {
         NSMutableArray *array = [NSMutableArray array];
-        for (iTermDirectoryEntry *entry in entries_) {
+        for (iTermRecentDirectoryMO *entry in entries_) {
             if ([entry.path rangeOfString:searchField_.stringValue
                                   options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 [array addObject:entry];
             }
         }
-        filteredEntries_ = [array retain];
+        filteredEntries_ = array;
     }
-    [tableView_ reloadData];
+    [_tableView reloadData];
 }
 
 - (void)controlTextDidChange:(NSNotification *)aNotification {
     [self computeFilteredEntries];
+}
+
+- (NSArray *)control:(NSControl *)control
+            textView:(NSTextView *)textView
+         completions:(NSArray *)words
+ forPartialWordRange:(NSRange)charRange
+ indexOfSelectedItem:(NSInteger *)index {
+    return @[];
 }
 
 - (CGFloat)minimumHeight {
@@ -266,21 +359,40 @@ static const CGFloat kHelpMargin = 5;
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-  return [self respondsToSelector:[item action]] && [tableView_ clickedRow] >= 0;
+  return [self respondsToSelector:[item action]] && [_tableView clickedRow] >= 0;
 }
 
 - (void)toggleStar:(id)sender {
-    NSInteger index = [tableView_ clickedRow];
+    NSInteger index = [_tableView clickedRow];
     if (index >= 0) {
-        iTermDirectoryEntry *entry = filteredEntries_[index];
-        entry.starred = !entry.starred;
-        [[iTermDirectoriesModel sharedInstance] save];
+        iTermRecentDirectoryMO *entry = filteredEntries_[index];
+        [[iTermShellHistoryController sharedInstance] setDirectory:entry
+                                                           starred:!entry.starred.boolValue];
     }
     [self updateDirectories];
 }
 
 - (void)help:(id)sender {
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"http://iterm2.com/shell_integration.html"]];
+    [[NSWorkspace sharedWorkspace] it_openURL:[NSURL URLWithString:@"https://iterm2.com/shell_integration.html"]
+                                       target:nil
+                                        style:iTermOpenStyleTab
+                                       window:self.window];
 }
+
+- (void)updateAppearance {
+    if (!self.window) {
+        return;
+    }
+    _tableView.appearance = self.window.appearance;
+}
+
+- (void)viewDidMoveToWindow {
+    [self updateAppearance];
+}
+
+- (void)windowAppearanceDidChange:(NSNotification *)notification {
+    [self updateAppearance];
+}
+
 
 @end

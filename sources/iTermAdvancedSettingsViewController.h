@@ -7,25 +7,10 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import "iTermSearchableViewController.h"
 
-@interface iTermAdvancedSettingsViewController : NSViewController <NSTableViewDataSource, NSTableViewDelegate>
+extern BOOL gIntrospecting;
 
-// Don't call these methods directly. Instead, go through iTermAdvancedSettingsModel.
-+ (BOOL)boolForIdentifier:(NSString*)identifier
-             defaultValue:(BOOL)defaultValue
-              description:(NSString*)description;
-
-+ (int)intForIdentifier:(NSString *)identifier
-           defaultValue:(int)defaultValue
-            description:(NSString *)description;
-
-+ (double)floatForIdentifier:(NSString *)identifier
-                defaultValue:(double)defaultValue
-                 description:(NSString *)description;
-
-+ (NSString *)stringForIdentifier:(NSString *)identifier
-                     defaultValue:(NSString *)defaultValue
-                      description:(NSString *)description;
-
+@interface iTermAdvancedSettingsViewController : NSViewController <iTermSearchableViewController, NSTableViewDataSource, NSTableViewDelegate>
 
 @end

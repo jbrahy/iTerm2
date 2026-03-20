@@ -24,36 +24,169 @@
  **  along with this program; if not, write to the Free Software
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
 #import "ITAddressBookMgr.h"
-#import "iTerm.h"
-#import "iTermAdvancedSettingsModel.h"
-#import "iTermPreferences.h"
-#import "iTermProfilePreferences.h"
-#import "ProfileModel.h"
-#import "PreferencePanel.h"
-#import "iTermKeyBindingMgr.h"
+
+#import "DebugLogging.h"
 #import "NSColor+iTerm.h"
 #import "NSDictionary+iTerm.h"
-#import "NSDictionary+Profile.h"
-#import "NSMutableDictionary+Profile.h"
-#import "NSFileManager+iTerm.h"
 #import "NSFont+iTerm.h"
-#import "NSStringIterm.h"
-#import "SCEvents.h"
-#include <netinet/in.h>
+#import "PreferencePanel.h"
+#import "ProfileModel.h"
+#import "iTerm2SharedARC-Swift.h"
+#import "iTermDynamicProfileManager.h"
+#import "iTermExpressionEvaluator.h"
+#import "iTermHotKeyController.h"
+#import "iTermHotKeyMigrationHelper.h"
+#import "iTermHotKeyProfileBindingController.h"
+#import "iTermKeyMappings.h"
+#import "iTermMigrationHelper.h"
+#import "iTermPreferences.h"
+#import "iTermProfilePreferences.h"
+#import "iTermProfilesMenuController.h"
+#import "iTermUserDefaults.h"
 #include <arpa/inet.h>
-#include <sys/types.h>
-#include <pwd.h>
 
-@interface ITAddressBookMgr () <SCEventListenerProtocol>
-@end
+NSString *const iTermUnicodeVersionDidChangeNotification = @"iTermUnicodeVersionDidChangeNotification";
 
-@implementation ITAddressBookMgr {
-  SCEvents *_events;
+// Progress bar color scheme constants
+NSString *const iTermProgressBarColorSchemeDefault = @"default";
+NSString *const iTermProgressBarColorSchemeRainbow = @"rainbow";
+NSString *const iTermProgressBarColorSchemeRed = @"red";
+NSString *const iTermProgressBarColorSchemeGreen = @"green";
+NSString *const iTermProgressBarColorSchemeBlue = @"blue";
+NSString *const iTermProgressBarColorSchemeYellow = @"yellow";
+NSString *const iTermProgressBarColorSchemePurple = @"purple";
+NSString *const iTermProgressBarColorSchemeCyan = @"cyan";
+NSString *const iTermProgressBarColorSchemeOrange = @"orange";
+
+// Values for KEY_CUSTOM_COMMAND
+NSString *const kProfilePreferenceCommandTypeCustomValue = @"Yes";
+NSString *const kProfilePreferenceCommandTypeLoginShellValue = @"No";
+NSString *const kProfilePreferenceCommandTypeCustomShellValue = @"Custom Shell";
+NSString *const kProfilePreferenceCommandTypeSSHValue = @"SSH";
+NSString *const kProfilePreferenceCommandTypeBrowserValue = @"Browser";
+
+const NSTimeInterval kMinimumAntiIdlePeriod = 1.0;
+const NSInteger iTermMaxInitialSessionSize = 1250;
+
+static NSMutableArray<NSNotification *> *sDelayedNotifications;
+
+NSString *iTermPathToSSH(void) {
+    return [[NSBundle bundleForClass:[ITAddressBookMgr class]] pathForResource:@"utilities/it2ssh" ofType:nil];
 }
 
-+ (id)sharedInstance
-{
+iTermWindowType iTermWindowDefaultType(void) {
+    return iTermThemedWindowType(WINDOW_TYPE_NORMAL);
+}
+
+// This is the inverse of iTermThemedWindowType
+iTermWindowType iTermUnthemedWindowType(iTermWindowType windowType) {
+    switch (windowType) {
+        case WINDOW_TYPE_NORMAL:
+        case WINDOW_TYPE_COMPACT:
+            return WINDOW_TYPE_NORMAL;
+
+        case WINDOW_TYPE_MAXIMIZED:
+        case WINDOW_TYPE_COMPACT_MAXIMIZED:
+            return WINDOW_TYPE_MAXIMIZED;
+
+        case WINDOW_TYPE_TRADITIONAL_FULL_SCREEN:
+        case WINDOW_TYPE_LION_FULL_SCREEN:
+            return WINDOW_TYPE_TRADITIONAL_FULL_SCREEN;
+
+        case WINDOW_TYPE_TOP_PERCENTAGE:
+        case WINDOW_TYPE_BOTTOM_PERCENTAGE:
+        case WINDOW_TYPE_LEFT_PERCENTAGE:
+        case WINDOW_TYPE_RIGHT_PERCENTAGE:
+        case WINDOW_TYPE_CENTERED:
+        case WINDOW_TYPE_BOTTOM_CELLS:
+        case WINDOW_TYPE_TOP_CELLS:
+        case WINDOW_TYPE_LEFT_CELLS:
+        case WINDOW_TYPE_RIGHT_CELLS:
+        case WINDOW_TYPE_NO_TITLE_BAR:
+        case WINDOW_TYPE_ACCESSORY:
+            return windowType;
+    }
+}
+
+// NOTE: If you change this also update iTermUnthemedWindowType
+iTermWindowType iTermThemedWindowType(iTermWindowType windowType) {
+    switch (windowType) {
+        case WINDOW_TYPE_COMPACT:
+        case WINDOW_TYPE_NORMAL:
+            switch ((iTermPreferencesTabStyle)[iTermPreferences intForKey:kPreferenceKeyTabStyle]) {
+                case TAB_STYLE_COMPACT:
+                case TAB_STYLE_MINIMAL:
+                    return WINDOW_TYPE_COMPACT;
+
+                case TAB_STYLE_AUTOMATIC:
+                case TAB_STYLE_LIGHT:
+                case TAB_STYLE_DARK:
+                case TAB_STYLE_LIGHT_HIGH_CONTRAST:
+                case TAB_STYLE_DARK_HIGH_CONTRAST:
+                    return WINDOW_TYPE_NORMAL;
+            }
+            assert(false);
+            return windowType;
+
+        case WINDOW_TYPE_COMPACT_MAXIMIZED:
+        case WINDOW_TYPE_MAXIMIZED:
+            switch ((iTermPreferencesTabStyle)[iTermPreferences intForKey:kPreferenceKeyTabStyle]) {
+                case TAB_STYLE_COMPACT:
+                case TAB_STYLE_MINIMAL:
+                    return WINDOW_TYPE_COMPACT_MAXIMIZED;
+
+                case TAB_STYLE_AUTOMATIC:
+                case TAB_STYLE_LIGHT:
+                case TAB_STYLE_DARK:
+                case TAB_STYLE_LIGHT_HIGH_CONTRAST:
+                case TAB_STYLE_DARK_HIGH_CONTRAST:
+                    return WINDOW_TYPE_MAXIMIZED;
+            }
+            assert(false);
+            return windowType;
+
+        case WINDOW_TYPE_TOP_PERCENTAGE:
+        case WINDOW_TYPE_LEFT_PERCENTAGE:
+        case WINDOW_TYPE_RIGHT_PERCENTAGE:
+        case WINDOW_TYPE_BOTTOM_PERCENTAGE:
+        case WINDOW_TYPE_ACCESSORY:
+        case WINDOW_TYPE_TRADITIONAL_FULL_SCREEN:
+        case WINDOW_TYPE_LION_FULL_SCREEN:
+        case WINDOW_TYPE_CENTERED:
+        case WINDOW_TYPE_TOP_CELLS:
+        case WINDOW_TYPE_LEFT_CELLS:
+        case WINDOW_TYPE_BOTTOM_CELLS:
+        case WINDOW_TYPE_RIGHT_CELLS:
+        case WINDOW_TYPE_NO_TITLE_BAR:
+            return windowType;
+    }
+    ITAssertWithMessage(NO, @"Unknown window type %@", @(windowType));
+    return WINDOW_TYPE_NORMAL;
+}
+
+NSString *iTermPercentageDescription(iTermPercentage percentage) {
+    return [NSString stringWithFormat:@"w=%0.1f%% h=%0.1f%%", percentage.width, percentage.height];
+}
+
+iTermPercentage iTermPercentageFromProfile(Profile *profile) {
+    iTermPercentage result = {
+        .width = [iTermProfilePreferences doubleForKey:KEY_WIDTH_PERCENTAGE inProfile:profile],
+        .height = [iTermProfilePreferences doubleForKey:KEY_HEIGHT_PERCENTAGE inProfile:profile]
+    };
+    return result;
+}
+
+@implementation ITAddressBookMgr {
+    NSNetServiceBrowser *sshBonjourBrowser;
+    NSNetServiceBrowser *ftpBonjourBrowser;
+    NSNetServiceBrowser *telnetBonjourBrowser;
+    NSMutableArray *bonjourServices;
+    iTermDynamicProfileManager *_dynamicProfileManager;
+}
+
++ (id)sharedInstance {
     static ITAddressBookMgr* shared = nil;
 
     if (!shared) {
@@ -63,26 +196,27 @@
     return shared;
 }
 
-- (id)init
-{
+- (instancetype)init {
     self = [super init];
     if (self) {
-        NSUserDefaults* prefs = [NSUserDefaults standardUserDefaults];
-
+        NSUserDefaults* prefs = [iTermUserDefaults userDefaults];
+        _dynamicProfileManager = [iTermDynamicProfileManager sharedInstance];
         if ([prefs objectForKey:KEY_DEPRECATED_BOOKMARKS] &&
             [[prefs objectForKey:KEY_DEPRECATED_BOOKMARKS] isKindOfClass:[NSDictionary class]] &&
             ![prefs objectForKey:KEY_NEW_BOOKMARKS]) {
             // Have only old-style bookmarks. Load them and convert them to new-style
             // bookmarks.
-            [self recursiveMigrateBookmarks:[prefs objectForKey:KEY_DEPRECATED_BOOKMARKS] path:[NSArray arrayWithObjects:nil]];
+            [iTermMigrationHelper recursiveMigrateBookmarks:[prefs objectForKey:KEY_DEPRECATED_BOOKMARKS] path:@[]];
             [prefs removeObjectForKey:KEY_DEPRECATED_BOOKMARKS];
             [prefs setObject:[[ProfileModel sharedInstance] rawData] forKey:KEY_NEW_BOOKMARKS];
             [[ProfileModel sharedInstance] removeAllBookmarks];
         }
 
+        iTermProfilesMenuController *menuController = [[iTermProfilesMenuController alloc] init];
+        [[ProfileModel sharedInstance] setMenuController:menuController];
         // Load new-style bookmarks.
         id newBookmarks = [prefs objectForKey:KEY_NEW_BOOKMARKS];
-        NSString *originalDefaultGuid = [[[prefs objectForKey:KEY_DEFAULT_GUID] copy] autorelease];
+        NSString *originalDefaultGuid = [[prefs objectForKey:KEY_DEFAULT_GUID] copy];
         if ([newBookmarks isKindOfClass:[NSArray class]]) {
             [self setBookmarks:newBookmarks
                    defaultGuid:[prefs objectForKey:KEY_DEFAULT_GUID]];
@@ -90,9 +224,9 @@
             NSLog(@"Loading profiles from %@", newBookmarks);
             NSMutableArray *profiles = [NSMutableArray array];
             NSMutableSet *guids = [NSMutableSet set];
-            if ([self loadDynamicProfilesFromFile:(NSString *)newBookmarks
-                                        intoArray:profiles
-                                            guids:guids] &&
+            if ([_dynamicProfileManager loadDynamicProfilesFromFile:(NSString *)newBookmarks
+                                                          intoArray:profiles
+                                                              guids:guids] &&
                 [profiles count] > 0) {
                 NSString *defaultGuid = profiles[0][KEY_GUID];
                 for (Profile *profile in profiles) {
@@ -110,16 +244,16 @@
 
         // Make sure there is at least one bookmark.
         if ([[ProfileModel sharedInstance] numberOfBookmarks] == 0) {
-            NSMutableDictionary* aDict = [[NSMutableDictionary alloc] init];
+            NSMutableDictionary *aDict = [[NSMutableDictionary alloc] init];
             [ITAddressBookMgr setDefaultsInBookmark:aDict];
             [[ProfileModel sharedInstance] addBookmark:aDict];
-            [aDict release];
+            [[ProfileModel sharedInstance] flush];
         }
 
         if ([iTermPreferences boolForKey:kPreferenceKeyAddBonjourHostsToProfiles]) {
             [self locateBonjourServices];
         }
-        
+
         [iTermPreferences addObserverForKey:kPreferenceKeyAddBonjourHostsToProfiles
                                       block:^(id previousValue, id newValue) {
                                           if ([newValue boolValue]) {
@@ -129,36 +263,32 @@
                                               [self removeBonjourProfiles];
                                           }
                                       }];
-        _events = [[SCEvents alloc] init];
-        _events.delegate = self;
-        [_events startWatchingPaths:@[ [self dynamicProfilesPath] ]];
 
         BOOL bookmarkWithDefaultGuidExisted =
             ([[ProfileModel sharedInstance] bookmarkWithGuid:originalDefaultGuid] != nil);
-        [self reloadDynamicProfiles];
+        [_dynamicProfileManager reloadDynamicProfiles];
         if (!bookmarkWithDefaultGuidExisted &&
             [[ProfileModel sharedInstance] bookmarkWithGuid:originalDefaultGuid] != nil) {
             // One of the dynamic profiles has the default guid.
             [[ProfileModel sharedInstance] setDefaultByGuid:originalDefaultGuid];
         }
+
+        [[iTermHotKeyMigrationHelper sharedInstance] migrateSingleHotkeyToMulti];
+        if (@available(macOS 15, *)) {
+            [iTermMigrationHelper askToRemoveDeprecatedKeyMappingsIfNeeded];
+        }
+        [[iTermHotKeyProfileBindingController sharedInstance] refresh];
     }
-    
+
     return self;
 }
 
-- (void)dealloc
-{
+- (void)dealloc {
     [bonjourServices removeAllObjects];
-    [bonjourServices release];
 
     [sshBonjourBrowser stop];
     [ftpBonjourBrowser stop];
     [telnetBonjourBrowser stop];
-    [sshBonjourBrowser release];
-    [ftpBonjourBrowser release];
-    [telnetBonjourBrowser release];
-    [_events release];
-    [super dealloc];
 }
 
 - (void)removeBonjourProfiles {
@@ -195,18 +325,14 @@
 
 - (void)stopLocatingBonjourServices {
     [sshBonjourBrowser stop];
-    [sshBonjourBrowser release];
     sshBonjourBrowser = nil;
 
     [ftpBonjourBrowser stop];
-    [ftpBonjourBrowser release];
     ftpBonjourBrowser = nil;
 
     [telnetBonjourBrowser stop];
-    [telnetBonjourBrowser release];
     telnetBonjourBrowser = nil;
 
-    [bonjourServices release];
     bonjourServices = nil;
 }
 
@@ -214,99 +340,33 @@
     return [origColor dictionaryValue];
 }
 
-// This method always returns a color in the calibrated color space. If the
-// color space in the plist is not calibrated, it is converted (which preserves
-// the actual color values).
 + (NSColor *)decodeColor:(NSDictionary*)plist {
-    return [plist colorValue];
-}
-
-- (void)copyProfileToBookmark:(NSMutableDictionary *)dict
-{
-    NSString* plistFile = [[NSBundle bundleForClass:[self class]] pathForResource:@"MigrationMap"
-                                                                           ofType:@"plist"];
-    NSDictionary* fileDict = [NSDictionary dictionaryWithContentsOfFile: plistFile];
-    NSUserDefaults* prefs = [NSUserDefaults standardUserDefaults];
-    NSDictionary* keybindingProfiles = [prefs objectForKey: @"KeyBindings"];
-    NSDictionary* displayProfiles =  [prefs objectForKey: @"Displays"];
-    NSDictionary* terminalProfiles = [prefs objectForKey: @"Terminals"];
-    NSArray* xforms = [fileDict objectForKey:@"Migration Map"];
-    for (int i = 0; i < [xforms count]; ++i) {
-        NSDictionary* xform = [xforms objectAtIndex:i];
-        NSString* destination = [xform objectForKey:@"Destination"];
-        if ([dict objectForKey:destination]) {
-            continue;
-        }
-        NSString* prefix = [xform objectForKey:@"Prefix"];
-        NSString* suffix = [xform objectForKey:@"Suffix"];
-        id defaultValue = [xform objectForKey:@"Default"];
-
-        NSDictionary* parent = nil;
-        if ([prefix isEqualToString:@"Terminal"]) {
-            parent = [terminalProfiles objectForKey:[dict objectForKey:KEY_TERMINAL_PROFILE]];
-        } else if ([prefix isEqualToString:@"Displays"]) {
-            parent = [displayProfiles objectForKey:[dict objectForKey:KEY_DISPLAY_PROFILE]];
-        } else if ([prefix isEqualToString:@"KeyBindings"]) {
-            parent = [keybindingProfiles objectForKey:[dict objectForKey:KEY_KEYBOARD_PROFILE]];
-        } else {
-            NSAssert(0, @"Bad prefix");
-        }
-        id value = nil;
-        if (parent) {
-            value = [parent objectForKey:suffix];
-        }
-        if (!value) {
-            value = defaultValue;
-        }
-        [dict setObject:value forKey:destination];
+    if (!plist) {
+        return nil;
     }
-}
-
-- (void)recursiveMigrateBookmarks:(NSDictionary*)node path:(NSArray*)path
-{
-    NSDictionary* data = [node objectForKey:@"Data"];
-
-    if ([data objectForKey:KEY_COMMAND]) {
-        // Not just a folder if it has a command.
-        NSMutableDictionary* temp = [NSMutableDictionary dictionaryWithDictionary:data];
-        [self copyProfileToBookmark:temp];
-        [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
-        [temp setObject:path forKey:KEY_TAGS];
-        [temp setObject:@"Yes" forKey:KEY_CUSTOM_COMMAND];
-        NSString* dir = [data objectForKey:KEY_WORKING_DIRECTORY];
-        if (dir && [dir length] > 0) {
-            [temp setObject:kProfilePreferenceInitialDirectoryCustomValue
-                     forKey:KEY_CUSTOM_DIRECTORY];
-        } else if (dir && [dir length] == 0) {
-            [temp setObject:kProfilePreferenceInitialDirectoryRecycleValue
-                     forKey:KEY_CUSTOM_DIRECTORY];
-        } else {
-            [temp setObject:kProfilePreferenceInitialDirectoryHomeValue
-                     forKey:KEY_CUSTOM_DIRECTORY];
-        }
-        [[ProfileModel sharedInstance] addBookmark:temp];
+    if ([plist isKindOfClass:[NSDictionary class]]) {
+        return [plist colorValue];
     }
-
-    NSArray* entries = [node objectForKey:@"Entries"];
-    for (int i = 0; i < [entries count]; ++i) {
-        NSMutableArray* childPath = [NSMutableArray arrayWithArray:path];
-        NSDictionary* dataDict = [node objectForKey:@"Data"];
-        if (dataDict) {
-            NSString* name = [dataDict objectForKey:@"Name"];
-            if (name) {
-                [childPath addObject:name];
-            }
-        }
-        [self recursiveMigrateBookmarks:[entries objectAtIndex:i] path:childPath];
+    DLog(@"Bogus color %@ from %@", plist, [NSThread callStackSymbols]);
+    NSString *string = [NSString castFrom:plist];
+    NSColor *colorFromString = [NSColor colorFromHexString:string];
+    if (colorFromString) {
+        DLog(@"Accepting a hex string because I'm easy like that");
+        return colorFromString;
     }
+    DLog(@"Giving you red so you know it's bad");
+    return [NSColor colorWithDisplayP3Red:1.0 green:0 blue:0 alpha:1];
 }
 
-+ (NSFont *)fontWithDesc:(NSString *)fontDesc {
-    return [fontDesc fontValue];
++ (NSFont *)defaultFont {
+    return [NSFont userFixedPitchFontOfSize:0.0] ?: [NSFont systemFontOfSize:[NSFont systemFontSize]];
 }
 
-- (void)setBookmarks:(NSArray*)newBookmarksArray defaultGuid:(NSString*)guid
-{
++ (NSFont *)fontWithDesc:(NSString *)fontDesc ligaturesEnabled:(BOOL)ligaturesEnabled {
+    return [fontDesc fontValueWithLigaturesEnabled:ligaturesEnabled] ?: [self defaultFont];
+}
+
+- (void)setBookmarks:(NSArray *)newBookmarksArray defaultGuid:(NSString *)guid {
     [[ProfileModel sharedInstance] load:newBookmarksArray];
     if (guid) {
         if ([[ProfileModel sharedInstance] bookmarkWithGuid:guid]) {
@@ -321,7 +381,7 @@
 }
 
 - (BOOL)verbose {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"iTermDebugBonjour"];
+    return [[iTermUserDefaults userDefaults] boolForKey:@"iTermDebugBonjour"];
 }
 
 // NSNetServiceBrowser delegate methods
@@ -352,7 +412,7 @@
     }
 
     // remove host entry from this group
-    NSMutableArray* toRemove = [[[NSMutableArray alloc] init] autorelease];
+    NSMutableArray *toRemove = [[NSMutableArray alloc] init];
 #ifdef SUPPORT_SFTP
     NSString* sftpName = [NSString stringWithFormat:@"%@-sftp", [aNetService name]];
 #endif
@@ -393,18 +453,31 @@
                                                [NSBundle bundleForClass: [self class]],
                                                @"Terminal Profiles");
     [aDict setObject:aName forKey: KEY_NAME];
-    [aDict setObject:@"No" forKey:KEY_CUSTOM_COMMAND];
-    [aDict setObject:@"" forKey: KEY_COMMAND];
+    [aDict setObject:kProfilePreferenceCommandTypeLoginShellValue forKey:KEY_CUSTOM_COMMAND];
+    [aDict setObject:@"" forKey: KEY_COMMAND_LINE];
     [aDict setObject:aName forKey: KEY_DESCRIPTION];
     [aDict setObject:kProfilePreferenceInitialDirectoryHomeValue
               forKey:KEY_CUSTOM_DIRECTORY];
     [aDict setObject:NSHomeDirectory() forKey: KEY_WORKING_DIRECTORY];
 }
 
+- (BOOL)usernameIsSafe:(NSString *)username {
+    NSCharacterSet *unsafeSet = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz_1234567890"] invertedSet];
+    const NSRange range = [username rangeOfCharacterFromSet:unsafeSet
+                                                    options:NSCaseInsensitiveSearch];
+    return range.location == NSNotFound;
+}
+
 - (void)_addBonjourHostProfileWithName:(NSString *)serviceName
-                       ipAddressString:(NSString *)ipAddressString
+                       ipAddressString:(NSString *)address
                                   port:(int)port
-                           serviceType:(NSString *)serviceType {
+                           serviceType:(NSString *)serviceType
+                              userName:(NSString *)username {
+    NSArray<NSString *> *allowedServices = @[ @"ssh", @"scp", @"sftp" ];
+    if (![allowedServices containsObject:serviceType]) {
+        return;
+    }
+
     NSMutableDictionary *newBookmark;
     Profile* prototype = [[ProfileModel sharedInstance] defaultBookmark];
     if (prototype) {
@@ -421,13 +494,22 @@
     if ([serviceType isEqualToString:@"ssh"] && port != 22) {
         optionalPortArg = [NSString stringWithFormat:@"-p %d ", port];
     }
-    [newBookmark setObject:[NSString stringWithFormat:@"%@ %@%@", serviceType, optionalPortArg, ipAddressString]
-                    forKey:KEY_COMMAND];
+    NSString *userNameArg = @"";
+    NSString *destination = address;
+    if (username.length > 0 && [self usernameIsSafe:username]) {
+        if ([serviceType isEqualToString:@"ssh"]) {
+            userNameArg = [NSString stringWithFormat:@"-l %@ ", username];
+        } else {
+            destination = [NSString stringWithFormat:@"%@@%@", username, address];
+        }
+    }
+    [newBookmark setObject:[NSString stringWithFormat:@"%@ %@%@%@", serviceType, userNameArg, optionalPortArg, destination]
+                    forKey:KEY_COMMAND_LINE];
     [newBookmark setObject:@"" forKey:KEY_WORKING_DIRECTORY];
-    [newBookmark setObject:@"Yes" forKey:KEY_CUSTOM_COMMAND];
+    [newBookmark setObject:kProfilePreferenceCommandTypeCustomValue forKey:KEY_CUSTOM_COMMAND];
     [newBookmark setObject:kProfilePreferenceInitialDirectoryHomeValue
                     forKey:KEY_CUSTOM_DIRECTORY];
-    [newBookmark setObject:ipAddressString forKey:KEY_BONJOUR_SERVICE_ADDRESS];
+    [newBookmark setObject:destination forKey:KEY_BONJOUR_SERVICE_ADDRESS];
     [newBookmark setObject:[NSArray arrayWithObjects:@"bonjour",nil] forKey:KEY_TAGS];
     [newBookmark setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
     [newBookmark setObject:@"No" forKey:KEY_DEFAULT_BOOKMARK];
@@ -440,7 +522,7 @@
         [newBookmark setObject:[NSString stringWithFormat:@"%@-sftp", serviceName] forKey:KEY_NAME];
         [newBookmark setObject:[NSArray arrayWithObjects:@"bonjour", @"sftp", nil] forKey:KEY_TAGS];
         [newBookmark setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
-        [newBookmark setObject:[NSString stringWithFormat:@"sftp %@", ipAddressString] forKey:KEY_COMMAND];
+        [newBookmark setObject:[NSString stringWithFormat:@"sftp %@", ipAddressString] forKey:KEY_COMMAND_LINE];
         [[ProfileModel sharedInstance] addBookmark:newBookmark];
     }
 #endif
@@ -464,6 +546,14 @@
         // Assume ipv6
         return htons(((struct sockaddr_in6*)sa)->sin6_port);
     }
+}
+
+- (NSString *)usernameFromTXTRecord:(NSData *)txtData {
+    NSDictionary<NSString *, NSData *> *txtFields = [NSNetService dictionaryFromTXTRecordData:txtData];
+    // https://kodi.wiki/view/Avahi_Zeroconf
+    NSData *usernameData = txtFields[@"u"] ?: txtFields[@"username"];
+    NSString *usernameString = [[NSString alloc] initWithData:usernameData encoding:NSUTF8StringEncoding];
+    return usernameString;
 }
 
 // NSNetService delegate
@@ -507,10 +597,13 @@
         if ([self verbose]) {
             NSLog(@"netServiceDidResolveAddress add profile with address %s", strAddr);
         }
+        
+        NSString *username = [self usernameFromTXTRecord:sender.TXTRecordData];
         [self _addBonjourHostProfileWithName:serviceName
                              ipAddressString:[NSString stringWithFormat:@"%s", strAddr]
                                         port:[self portFromSockaddr:socketAddress]
-                                 serviceType:serviceType];
+                                 serviceType:serviceType
+                                    userName:username];
 
         // remove from array now that resolving is done
         if ([bonjourServices containsObject:sender]) {
@@ -561,59 +654,175 @@
     }
 }
 
-+ (NSString *)shellLauncherCommand {
-    return [NSString stringWithFormat:@"%@ --launch_shell",
-            [[[NSBundle mainBundle] executablePath] stringWithEscapedShellCharacters]];
++ (NSString *)sanitizedCustomShell:(NSString *)customShell {
+    NSArray<NSString *> *parts = [customShell componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if ([parts[0] length] == 0) {
+        return nil;
+    }
+    return parts[0];
 }
 
-+ (NSString*)loginShellCommandForBookmark:(Profile*)bookmark
++ (NSString *)shellLauncherCommandWithCustomShell:(NSString *)customShell {
+    NSString *sanitizedCustomShell = [self sanitizedCustomShell:customShell];
+    NSString *customShellArg = sanitizedCustomShell ? [@" SHELL=" stringByAppendingString:sanitizedCustomShell] : @"";
+    NSString *shellLauncher = [[NSBundle bundleForClass:self.class] pathForAuxiliaryExecutable:@"ShellLauncher"];
+
+    // NOTE: If you change this also update ShellLauncherInfo.init(_:)
+    return [NSString stringWithFormat:@"/usr/bin/login -f%@pl %@ %@ --launch_shell%@",
+            [self hushlogin] ? @"q" : @"",
+            [NSUserName() stringWithBackslashEscapedShellCharactersIncludingNewlines:YES],
+            [shellLauncher stringWithBackslashEscapedShellCharactersIncludingNewlines:YES],
+            customShellArg];
+}
+
++ (NSString*)loginShellCommandForBookmark:(Profile*)profile
                             forObjectType:(iTermObjectType)objectType {
     NSString *customDirectoryString;
-    if ([[bookmark objectForKey:KEY_CUSTOM_DIRECTORY] isEqualToString:kProfilePreferenceInitialDirectoryAdvancedValue]) {
+    if ([profile[KEY_CUSTOM_DIRECTORY] isEqualToString:kProfilePreferenceInitialDirectoryAdvancedValue]) {
         switch (objectType) {
             case iTermWindowObject:
-                customDirectoryString = [bookmark objectForKey:KEY_AWDS_WIN_OPTION];
+                customDirectoryString = profile[KEY_AWDS_WIN_OPTION];
                 break;
             case iTermTabObject:
-                customDirectoryString = [bookmark objectForKey:KEY_AWDS_TAB_OPTION];
+                customDirectoryString = profile[KEY_AWDS_TAB_OPTION];
                 break;
             case iTermPaneObject:
-                customDirectoryString = [bookmark objectForKey:KEY_AWDS_PANE_OPTION];
+                customDirectoryString = profile[KEY_AWDS_PANE_OPTION];
                 break;
             default:
                 NSLog(@"Bogus object type %d", (int)objectType);
                 customDirectoryString = kProfilePreferenceInitialDirectoryHomeValue;
         }
     } else {
-        customDirectoryString = [bookmark objectForKey:KEY_CUSTOM_DIRECTORY];
+        customDirectoryString = profile[KEY_CUSTOM_DIRECTORY];
     }
 
-    if ([customDirectoryString isEqualToString:kProfilePreferenceInitialDirectoryHomeValue]) {
+    if ([customDirectoryString isEqualToString:kProfilePreferenceInitialDirectoryHomeValue] &&
+        [[self customShellForProfile:profile] length] == 0) {
         // Run login without -l argument: this is a login session and will use the home dir.
         return [self standardLoginCommand];
     } else {
-        // Not using the home directory. This requires some trickery.
+        // Not using the home directory/default shell. This requires some trickery.
         // Run iTerm2's executable with a special flag that makes it run the shell as a login shell
         // (with "-" inserted at the start of argv[0]). See shell_launcher.c for more details.
-        NSString *launchShellCommand = [self shellLauncherCommand];
+        NSString *launchShellCommand = [self shellLauncherCommandWithCustomShell:[self customShellForProfile:profile]];
         return launchShellCommand;
     }
 }
 
-+ (NSString *)standardLoginCommand {
-    return [NSString stringWithFormat:@"login -fp \"%@\"", NSUserName()];
+// See issue 4425 for why we do this.
++ (BOOL)hushlogin {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@".hushlogin"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:path];
 }
 
-+ (NSString*)bookmarkCommand:(Profile*)bookmark
-               forObjectType:(iTermObjectType)objectType
-{
-    BOOL custom = [[bookmark objectForKey:KEY_CUSTOM_COMMAND] isEqualToString:@"Yes"];
-    if (custom) {
-        return [bookmark objectForKey:KEY_COMMAND];
-    } else {
-        return [ITAddressBookMgr loginShellCommandForBookmark:bookmark
-                                                forObjectType:objectType];
++ (NSString *)standardLoginCommand {
+    NSString *userName = NSUserName();
+    // Active directory users have backslash in their user name (issue 6999)
+    // Somehow, users can have spaces in their user name (issue 8360)
+    //
+    // Avoid using standard escaping which is wrong for a quoted string. I don't know why
+    // this is in quotes, but I'm afraid to change it because it's been that way for so
+    // long and the original commit message was lost.
+    //
+    // The returned value gets parsed into an argument array using -componentsInShellCommand
+    // by computeArgvForCommand:substitutions:completion:.
+    userName = [userName stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    userName = [userName stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+    return [NSString stringWithFormat:@"/usr/bin/login -f%@p \"%@\"", [self hushlogin] ? @"q" : @"",
+            userName];
+}
+
++ (NSString *)legacyStandardLoginCommand {
+    NSString *userName = NSUserName();
+    // Active directory users have backslash in their user name (issue 6999)
+    // Somehow, users can have spaces in their user name (issue 8360)
+    //
+    // Avoid using standard escaping which is wrong for a quoted string. I don't know why
+    // this is in quotes, but I'm afraid to change it because it's been that way for so
+    // long and the original commit message was lost.
+    //
+    // The returned value gets parsed into an argument array using -componentsInShellCommand
+    // by computeArgvForCommand:substitutions:completion:.
+    userName = [userName stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    userName = [userName stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+    return [NSString stringWithFormat:@"login -f%@p \"%@\"", [self hushlogin] ? @"q" : @"",
+            userName];
+}
+
++ (void)computeCommandForProfile:(Profile *)profile
+                      objectType:(iTermObjectType)objectType
+                           scope:(iTermVariableScope *)scope
+                      completion:(void (^)(NSString *, BOOL))completion {
+    const BOOL ssh = [profile[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeSSHValue];
+    const BOOL custom = [profile[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeCustomValue];
+    NSString *swifty = [self bookmarkCommandSwiftyString:profile forObjectType:objectType];
+    if (!custom && !ssh) {
+        DLog(@"Don't have a custom command. Computed command is %@", swifty);
+        completion(swifty, ssh);
+        return;
     }
+
+    DLog(@"Must evaluate swifty string: %@", swifty);
+    iTermExpressionEvaluator *evaluator =
+    [[iTermExpressionEvaluator alloc] initWithStrictInterpolatedString:swifty
+                                                                 scope:scope];
+    [evaluator evaluateWithTimeout:5 sideEffectsAllowed:YES completion:^(iTermExpressionEvaluator * _Nonnull evaluator) {
+        NSString *string = [NSString castFrom:evaluator.value];
+        DLog(@"Evaluation finished with value %@", string);
+        string = [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!string.length) {
+            string = [ITAddressBookMgr loginShellCommandForBookmark:profile
+                                                      forObjectType:objectType];
+        }
+        DLog(@"Finish with %@", string);
+        completion(string, ssh);
+    }];
+}
+
++ (NSString *)bookmarkCommandSwiftyString:(Profile *)bookmark
+                            forObjectType:(iTermObjectType)objectType {
+    const BOOL browser = [bookmark[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeBrowserValue];
+    if (browser) {
+        return bookmark[KEY_COMMAND_LINE];
+    }
+    const BOOL custom = [bookmark[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeCustomValue];
+    const BOOL ssh = [bookmark[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeSSHValue];
+    if (custom || ssh) {
+        NSString *command = bookmark[KEY_COMMAND_LINE];
+        if ([[command stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet] ] length] > 0) {
+            if (ssh) {
+                NSDictionary *dict = bookmark[KEY_SSH_CONFIG];
+                iTermSSHConfiguration *config = [[iTermSSHConfiguration alloc] initWithDictionary:dict];
+                if (!config.sshIntegration) {
+                    return [NSString stringWithFormat:@"ssh %@", command];
+                }
+                NSString *wrappedCommand = [NSString stringWithFormat:@"'%@' %@",
+                                            iTermPathToSSH(),
+                                            command];
+                command = [NSString stringWithFormat:@"/usr/bin/login -fpq %@ %@ -c %@",
+                           [NSUserName() stringWithBackslashEscapedShellCharactersIncludingNewlines:YES],
+                           [iTermOpenDirectory userShell] ?: @"/bin/zsh",
+                           [wrappedCommand stringWithBackslashEscapedShellCharactersIncludingNewlines:YES]];
+                DLog(@"wrappedCommand=%@, command=%@", wrappedCommand, command);
+            }
+            return command;
+        }
+    }
+    return [ITAddressBookMgr loginShellCommandForBookmark:bookmark
+                                            forObjectType:objectType];
+}
+
++ (NSString *)customShellForProfile:(Profile *)profile {
+    if (![profile[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeCustomShellValue]) {
+        return nil;
+    }
+    NSString *customShell = profile[KEY_COMMAND_LINE];
+    customShell = [customShell stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (customShell.length == 0) {
+        return nil;
+    }
+    return customShell;
 }
 
 + (NSString *)_advancedWorkingDirWithOption:(NSString *)option
@@ -629,239 +838,114 @@
     }
 }
 
-+ (NSString*)bookmarkWorkingDirectory:(Profile*)bookmark forObjectType:(iTermObjectType)objectType
-{
-    NSString* custom = [bookmark objectForKey:KEY_CUSTOM_DIRECTORY];
-    if ([custom isEqualToString:kProfilePreferenceInitialDirectoryCustomValue]) {
-        return [bookmark objectForKey:KEY_WORKING_DIRECTORY];
-    } else if ([custom isEqualToString:kProfilePreferenceInitialDirectoryRecycleValue]) {
-        return @"";
-    } else if ([custom isEqualToString:kProfilePreferenceInitialDirectoryAdvancedValue]) {
-        switch (objectType) {
-          case iTermWindowObject:
-              return [ITAddressBookMgr _advancedWorkingDirWithOption:[bookmark objectForKey:KEY_AWDS_WIN_OPTION]
-                                                           directory:[bookmark objectForKey:KEY_AWDS_WIN_DIRECTORY]];
-          case iTermTabObject:
-              return [ITAddressBookMgr _advancedWorkingDirWithOption:[bookmark objectForKey:KEY_AWDS_TAB_OPTION]
-                                                           directory:[bookmark objectForKey:KEY_AWDS_TAB_DIRECTORY]];
-          case iTermPaneObject:
-              return [ITAddressBookMgr _advancedWorkingDirWithOption:[bookmark objectForKey:KEY_AWDS_PANE_OPTION]
-                                                           directory:[bookmark objectForKey:KEY_AWDS_PANE_DIRECTORY]];
-          default:
-              NSLog(@"Bogus object type %d", (int)objectType);
-              return NSHomeDirectory();  // Shouldn't happen
-        }
-    } else {
-        // Home dir, custom == "No"
-        return NSHomeDirectory();
-    }
-}
-
-#pragma mark - SCEventListenerProtocol
-
-- (void)pathWatcher:(SCEvents *)pathWatcher eventOccurred:(SCEvent *)event {
-    [self reloadDynamicProfiles];
-}
-
-#pragma mark - Dynamic Profiles
-
-- (NSString *)dynamicProfilesPath {
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *appSupport = [fileManager applicationSupportDirectory];
-    NSString *thePath = [appSupport stringByAppendingPathComponent:@"DynamicProfiles"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:thePath
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
-    return thePath;
-}
-
-- (void)reloadDynamicProfiles {
-    NSString *path = [self dynamicProfilesPath];
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-
-    // Load the current dynamic profiles into |newProfiles|. The |guids| set
-    // is used to ensure that guids are unique across all files.
-    NSMutableArray *newProfiles = [NSMutableArray array];
-    NSMutableSet *guids = [NSMutableSet set];
-    NSMutableArray *fileNames = [NSMutableArray array];
-    for (NSString *file in [fileManager enumeratorAtPath:path]) {
-        [fileNames addObject:file];
-    }
-    [fileNames sortUsingSelector:@selector(compare:)];
-    for (NSString *file in fileNames) {
-        if ([file hasPrefix:@"."]) {
-            continue;
-        }
-        NSString *fullName = [path stringByAppendingPathComponent:file];
-        if (![self loadDynamicProfilesFromFile:fullName intoArray:newProfiles guids:guids]) {
-            NSLog(@"Igoring dynamic profiles in malformed file %@ and continuing.", fullName);
-        }
-    }
-
-    // Update changes to existing dynamic profiles and add ones whose guids are
-    // not known.
-    NSArray *oldProfiles = [self dynamicProfiles];
-    BOOL shouldReload = NO;
-    for (Profile *profile in newProfiles) {
-        Profile *existingProfile = [self profileWithGuid:profile[KEY_GUID] inArray:oldProfiles];
-        if (existingProfile) {
-            [self updateDynamicProfile:profile];
-            shouldReload = YES;
-        } else {
-            [self addDynamicProfile:profile];
-        }
-    }
-
-    // Remove dynamic profiles whose guids no longer exist.
-    for (Profile *profile in oldProfiles) {
-        if (![self profileWithGuid:profile[KEY_GUID] inArray:newProfiles]) {
-            [self removeDynamicProfile:profile];
-        }
-    }
-    if (shouldReload) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:kReloadAllProfiles
-                                                            object:nil
-                                                          userInfo:nil];
-    }
-}
-
-// Load the profiles from |filename| and add valid profiles into |profiles|.
-// Add their guids to |guids|.
-- (BOOL)loadDynamicProfilesFromFile:(NSString *)filename
-                          intoArray:(NSMutableArray *)profiles
-                              guids:(NSMutableSet *)guids {
-    // First, try xml and binary.
-    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:filename];
-    if (!dict) {
-        // Try JSON
-        NSData *data = [NSData dataWithContentsOfFile:filename];
-        if (!data) {
-            NSLog(@"Dynamic Profiles file %@ is unreadable", filename);
-            return NO;
-        }
-        NSError *error = nil;
-        dict = [NSJSONSerialization JSONObjectWithData:data
-                                               options:0
-                                                 error:&error];
-        if (!dict) {
-            NSLog(@"Dynamic Profiles file %@ doesn't contain a valid property list", filename);
-            return NO;
-        }
-    }
-    NSArray *entries = dict[@"Profiles"];
-    if (!entries) {
-        NSLog(@"Property list in %@ has no entries", entries);
++ (BOOL)canRemoveProfile:(NSDictionary *)profile fromModel:(ProfileModel *)model {
+    DLog(@"removeProfile called");
+    if (!profile) {
+        DLog(@"Nil profile");
         return NO;
     }
-    for (Profile *profile in entries) {
-        if (![profile[KEY_GUID] isKindOfClass:[NSString class]]) {
-            NSLog(@"Dynamic profile is missing the Guid field in file %@", filename);
-            continue;
-        }
-        if (![profile[KEY_NAME] isKindOfClass:[NSString class]]) {
-            NSLog(@"Dynamic profile with guid %@ is missing the name field", profile[KEY_GUID]);
-            continue;
-        }
-        if ([self nonDynamicProfileHasGuid:profile[KEY_GUID]]) {
-            NSLog(@"Dynamic profile with guid %@ conflicts with non-dynamic profile with same guid", profile[KEY_GUID]);
-            continue;
-        }
-        if ([guids containsObject:profile[KEY_GUID]]) {
-            NSLog(@"Two dynamic profiles have the same guid: %@", profile[KEY_GUID]);
-            continue;
-        }
-        [profiles addObject:profile];
-        [guids addObject:profile[KEY_GUID]];
+
+    if (![model bookmarkWithGuid:profile[KEY_GUID]]) {
+        DLog(@"Can't remove profile not in shared profile model");
+        return NO;
     }
+
+    if ([model numberOfBookmarks] < 2) {
+        DLog(@"Can't remove last profile");
+        return NO;
+    }
+
+    DLog(@"Ok to remove.");
     return YES;
 }
 
-// Does any "regular" profile have Guid |guid|?
-- (BOOL)nonDynamicProfileHasGuid:(NSString *)guid {
-    Profile *profile = [[ProfileModel sharedInstance] bookmarkWithGuid:guid];
-    if (!profile) {
++ (BOOL)removeProfile:(NSDictionary *)profile fromModel:(ProfileModel *)model {
+    NSString *guid = profile[KEY_GUID];
+    DLog(@"Remove profile with guid %@...", guid);
+    if ([model numberOfBookmarks] == 1) {
+        DLog(@"Refusing to remove only profile");
         return NO;
     }
-    return !profile.profileIsDynamic;
+
+    DLog(@"Removing key bindings that reference the guid being removed");
+    [self removeKeyMappingsReferringToGuid:guid];
+    DLog(@"Removing profile from model");
+    [model removeProfileWithGuid:guid];
+
+    // Ensure all profile list views reload their data to avoid issue 4033.
+    DLog(@"Posting profile was deleted notification");
+    [self postNotificationName:kProfileWasDeletedNotification object:nil userInfo:nil];
+    [model flush];
+    return YES;
 }
 
-// Returns the current dynamic profiles.
-- (NSArray *)dynamicProfiles {
-    NSMutableArray *array = [NSMutableArray array];
-    for (Profile *profile in [[ProfileModel sharedInstance] bookmarks]) {
-        if (profile.profileIsDynamic) {
-            [array addObject:profile];
++ (void)removeKeyMappingsReferringToGuid:(NSString *)badRef {
+    [iTermKeyMappings suppressNotifications:^{
+        for (NSString* guid in [[ProfileModel sharedInstance] guids]) {
+            Profile *profile = [[ProfileModel sharedInstance] bookmarkWithGuid:guid];
+            profile = [iTermKeyMappings removeKeyMappingsReferencingGuid:badRef fromProfile:profile];
+            if (profile) {
+                [[ProfileModel sharedInstance] setBookmark:profile withGuid:guid];
+            }
         }
-    }
-    return array;
-}
-
-// Returns the first profile in |profiles| whose guid is |guid|.
-- (Profile *)profileWithGuid:(NSString *)guid inArray:(NSArray *)profiles {
-    for (Profile *aProfile in profiles) {
-        if ([guid isEqualToString:aProfile[KEY_GUID]]) {
-            return aProfile;
+        for (NSString* guid in [[ProfileModel sessionsInstance] guids]) {
+            Profile* profile = [[ProfileModel sessionsInstance] bookmarkWithGuid:guid];
+            profile = [iTermKeyMappings removeKeyMappingsReferencingGuid:badRef fromProfile:profile];
+            if (profile) {
+                [[ProfileModel sessionsInstance] setBookmark:profile withGuid:guid];
+            }
         }
-    }
-    return nil;
+        [iTermKeyMappings removeKeyMappingsReferencingGuid:badRef fromProfile:nil];
+    }];
+    [self postNotificationName:kKeyBindingsChangedNotification object:nil userInfo:nil];
 }
 
-// Reload a dynamic profile, re-merging it with its parent.
-- (void)updateDynamicProfile:(Profile *)newProfile {
-    Profile *prototype = [self prototypeForDynamicProfile:newProfile];
-    NSMutableDictionary *merged = [self profileByMergingProfile:newProfile
-                                                    intoProfile:prototype];
-    [merged profileAddDynamicTagIfNeeded];
-    [[ProfileModel sharedInstance] setBookmark:merged
-                                      withGuid:merged[KEY_GUID]];
++ (void)postNotificationName:(NSString *)name object:(id)object userInfo:(id)userInfo {
+    NSNotification *notification = [NSNotification notificationWithName:name object:object userInfo:userInfo];
+    [self postNotification:notification];
 }
 
-// Copies fields from |profile| over those in |prototype| and returns a new
-// mutable dictionary.
-- (NSMutableDictionary *)profileByMergingProfile:(Profile *)profile
-                                     intoProfile:(Profile *)prototype {
-    NSMutableDictionary *merged = [[profile mutableCopy] autorelease];
-    for (NSString *key in prototype) {
-        if (profile[key]) {
-            merged[key] = profile[key];
-        } else {
-            merged[key] = prototype[key];
++ (void)postNotification:(NSNotification *)notification {
+    if (sDelayedNotifications) {
+        for (NSNotification *existing in sDelayedNotifications) {
+            if ([existing.name isEqualToString:notification.name] &&
+                (existing.object == notification.object || [existing.object isEqual:notification.object]) &&
+                (existing.userInfo == notification.userInfo || [existing.userInfo isEqual:notification.userInfo])) {
+                // Already have a notification like this
+                return;
+            }
         }
+        [sDelayedNotifications addObject:notification];
+    } else {
+        [[NSNotificationCenter defaultCenter] postNotification:notification];
     }
-    return merged;
 }
 
-- (Profile *)prototypeForDynamicProfile:(Profile *)profile {
-    Profile *prototype = nil;
-    NSString *parentName = profile[KEY_DYNAMIC_PROFILE_PARENT_NAME];
-    if (parentName) {
-        prototype = [[ProfileModel sharedInstance] bookmarkWithName:parentName];
-        if (!prototype) {
-            NSLog(@"Dynamic profile %@ references unknown parent name %@. Using default profile as parent.",
-                  profile[KEY_NAME], parentName);
++ (void)performBlockWithCoalescedNotifications:(void (^)(void))block {
+    if (!sDelayedNotifications) {
+        sDelayedNotifications = [[NSMutableArray alloc] init];
+
+        block();
+
+        for (NSNotification *notification in sDelayedNotifications) {
+            [[NSNotificationCenter defaultCenter] postNotification:notification];
         }
+        sDelayedNotifications = nil;
+    } else {
+        block();
     }
-    if (!prototype) {
-        prototype = [[ProfileModel sharedInstance] defaultBookmark];
-    }
-    return prototype;
 }
 
-// Add a new dynamic profile to the model.
-- (void)addDynamicProfile:(Profile *)profile {
-    Profile *prototype = [self prototypeForDynamicProfile:profile];
-    NSMutableDictionary *merged = [self profileByMergingProfile:profile
-                                                    intoProfile:prototype];
-    [merged profileAddDynamicTagIfNeeded];
+// identifier is optional. Old shortcuts only have a title.
++ (BOOL)shortcutIdentifier:(NSString *)identifier title:(NSString *)title matchesItem:(NSMenuItem *)item {
+    if (item.identifier && [identifier isEqualToString:item.identifier]) {
+        return YES;
+    }
+    if (!identifier && [title isEqualToString:[item title]]) {
+        return YES;
+    }
 
-    [[ProfileModel sharedInstance] addBookmark:merged];
-}
-
-// Remove a dynamic profile from the model. Updates displays of profiles,
-// references to the profile, etc.
-- (void)removeDynamicProfile:(Profile *)profile {
-    [[PreferencePanel sharedInstance] removeProfileWithGuid:profile[KEY_GUID]];
+    return NO;
 }
 
 @end

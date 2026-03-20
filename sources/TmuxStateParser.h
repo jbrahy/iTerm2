@@ -11,8 +11,6 @@
 extern NSString *kStateDictSavedGrid;
 extern NSString *kStateDictAltSavedCX;
 extern NSString *kStateDictAltSavedCY;
-extern NSString *kStateDictSavedCX;
-extern NSString *kStateDictSavedCY;
 extern NSString *kStateDictCursorX;
 extern NSString *kStateDictCursorY;
 extern NSString *kStateDictScrollRegionUpper;
@@ -27,12 +25,14 @@ extern NSString *kStateDictMouseStandardMode;
 extern NSString *kStateDictMouseButtonMode;
 extern NSString *kStateDictMouseAnyMode;
 extern NSString *kStateDictMouseUTF8Mode;
+extern NSString *kStateDictMouseSGRMode;  // tmux 3.1+
 
 @interface TmuxStateParser : NSObject
 
 + (NSString *)format;
 + (TmuxStateParser *)sharedInstance;
 - (NSMutableDictionary *)parsedStateFromString:(NSString *)layout
-                                     forPaneId:(int)paneId;
+                                     forPaneId:(int)paneId
+                              workAroundTabBug:(BOOL)workAroundTabBug;
 
 @end

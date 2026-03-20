@@ -21,319 +21,111 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import "iTerm.h"
-#import "PTYWindow.h"
-#import "PreferencePanel.h"
-#import "PseudoTerminal.h"
+#import "DebugLogging.h"
 #import "FutureMethods.h"
-#import "iTermController.h"
-#import "iTermApplicationDelegate.h"
-#import "iTermPreferences.h"
+#import "iTermApplication.h"
 #import "iTermAdvancedSettingsModel.h"
+#import "iTermApplicationDelegate.h"
+#import "iTermController.h"
+#import "iTermSelectorSwizzler.h"
+#import "iTermWindowOcclusionChangeMonitor.h"
+#import "iTermPreferences.h"
+#import "iTermSessionLauncher.h"
+#import "NSArray+iTerm.h"
+#import "PTYWindow.h"
 #import "objc/runtime.h"
 
-#ifdef PSEUDOTERMINAL_VERBOSE_LOGGING
-#define PtyLog NSLog
-#else
-#define PtyLog DLog
-#endif
+NSString *const kTerminalWindowStateRestorationWindowArrangementKey = @"ptyarrangement";
+NSString *const iTermWindowDocumentedEditedDidChange = @"iTermWindowDocumentedEditedDidChange";
+
+const NSTimeInterval iTermWindowTitleChangeMinimumInterval = 0.1;
 
 @interface NSView (PrivateTitleBarMethods)
 - (NSView *)titlebarContainerView;
 @end
 
-@implementation PTYWindow {
-    int blurFilter;
-    double blurRadius_;
-    BOOL layoutDone;
+@interface NSObject(PrivateNSTitlebarContainerView)
+- (void)_updateDividerLayerForController:(id)controller animated:(BOOL)animated;
+@end
 
-    // True while in -[NSWindow toggleFullScreen:].
-    BOOL isTogglingLionFullScreen_;
-    NSObject *restoreState_;
-}
+// Insane hacks inspired by Chrome.
+// This makes it possible to implement our own window dragging.
+// Absurdly, making the window title invisible does not stop it from being used
+// to drag the window.
 
-- (void)dealloc
-{
-    [restoreState_ release];
-    [super dealloc];
+@interface NSWindow (PrivateAPI)
++ (Class)frameViewClassForStyleMask:(NSUInteger)windowStyle;
+- (void)_moveToScreen:(id)sender;
+- (void)_resizeFromWindowManagerWithTargetGeometry:(id)geometry
+                                    springSettings:(id)springSettings
+                                        completion:(id)completion NS_AVAILABLE_MAC(15_0);
+@end
 
-}
+@interface NSFrameView : NSView
+@end
 
-- (NSString *)description {
-    return [NSString stringWithFormat:@"<%@: %p frame=%@>",
-            [self class],
-            self,
-            [NSValue valueWithRect:self.frame]];
-}
+@interface NSTitledFrame : NSFrameView
+// From class-dump
++ (float)_titlebarHeight:(unsigned int)fp8;
+@end
 
-- (void)encodeRestorableStateWithCoder:(NSCoder *)coder {
-    [super encodeRestorableStateWithCoder:coder];
-    [coder encodeObject:restoreState_ forKey:kPseudoTerminalStateRestorationWindowArrangementKey];
-}
+@interface NSThemeFrame : NSTitledFrame
+@end
 
-- (void)setRestoreState:(NSObject *)restoreState {
-    [restoreState_ autorelease];
-    restoreState_ = [restoreState retain];
-}
+@interface NSThemeFrame (Private)
+- (CGFloat)_titlebarHeight;
+@end
 
-- (void)enableBlur:(double)radius {
-    const double kEpsilon = 0.001;
-    if (blurFilter && fabs(blurRadius_ - radius) < kEpsilon) {
-        return;
-    }
+@interface iTermThemeFrame : NSThemeFrame
+@end
 
-    CGSConnectionID con = CGSMainConnectionID();
-    if (!con) {
-        return;
-    }
-    CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (function) {
-        function(con, [self windowNumber], (int)radius);
-    } else {
-        NSLog(@"Couldn't get blur function");
-    }
-    blurRadius_ = radius;
-}
+@implementation iTermThemeFrame
 
-- (void)disableBlur {
-    CGSConnectionID con = CGSMainConnectionID();
-    if (!con) {
-        return;
-    }
-
-    CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (function) {
-        function(con, [self windowNumber], 0);
-    } else if (blurFilter) {
-        CGSRemoveWindowFilter(con, (CGSWindowID)[self windowNumber], blurFilter);
-        CGSReleaseCIFilter(CGSMainConnectionID(), blurFilter);
-        blurFilter = 0;
-    }
-}
-
-- (id<PTYWindowDelegateProtocol>)ptyDelegate {
-    return (id<PTYWindowDelegateProtocol>)[self delegate];
-}
-
-- (void)toggleFullScreen:(id)sender {
-    if (![[self ptyDelegate] lionFullScreen]  &&
-        ![iTermPreferences boolForKey:kPreferenceKeyLionStyleFullscren]) {
-        // The user must have clicked on the toolbar arrow, but the pref is set
-        // to use traditional fullscreen.
-        [(id<PTYWindowDelegateProtocol>)[self delegate] toggleTraditionalFullScreenMode];
-    } else {
-        [super toggleFullScreen:sender];
-    }
-}
-
-- (BOOL)isTogglingLionFullScreen {
-    return isTogglingLionFullScreen_;
-}
-
-- (int)screenNumber {
-    return [[[[self screen] deviceDescription] objectForKey:@"NSScreenNumber"] intValue];
-}
-
-- (void)smartLayout {
-    PtyLog(@"enter smartLayout");
-    NSEnumerator* iterator;
-
-    int currentScreen = [self screenNumber];
-    NSRect screenRect = [[self screen] visibleFrame];
-
-    // Get a list of relevant windows, same screen & workspace
-    NSMutableArray* windows = [[NSMutableArray alloc] init];
-    iterator = [[[iTermController sharedInstance] terminals] objectEnumerator];
-    PseudoTerminal* term;
-    PtyLog(@"Begin iterating over terminals");
-    while ((term = [iterator nextObject])) {
-        PTYWindow* otherWindow = (PTYWindow*)[term window];
-        PtyLog(@"See window %@ at %@", otherWindow, [NSValue valueWithRect:[otherWindow frame]]);
-        if (otherWindow == self) {
-            PtyLog(@" skip - is self");
-            continue;
-        }
-        int otherScreen = [otherWindow screenNumber];
-        if (otherScreen != currentScreen) {
-            PtyLog(@" skip - screen %d vs my %d", otherScreen, currentScreen);
-            continue;
-        }
-
-        if (![otherWindow isOnActiveSpace]) {
-            PtyLog(@"  skip - not in active space");
-            continue;
-        }
-
-        PtyLog(@" add window to array of windows");
-        [windows addObject:otherWindow];
-    }
-
-
-    // Find the spot on screen with the lowest window intersection
-    float bestIntersect = INFINITY;
-    NSRect bestFrame = [self frame];
-
-    NSRect placementRect = NSMakeRect(
-        screenRect.origin.x,
-        screenRect.origin.y,
-        MAX(1, screenRect.size.width-[self frame].size.width),
-        MAX(1, screenRect.size.height-[self frame].size.height)
-    );
-    PtyLog(@"PlacementRect is %@", [NSValue valueWithRect:placementRect]);
-
-    for(int x = 0; x < placementRect.size.width/2; x += 50) {
-        for(int y = 0; y < placementRect.size.height/2; y += 50) {
-            PtyLog(@"Try coord %d,%d", x, y);
-
-            NSRect testRects[4] = {[self frame]};
-
-            // Top Left
-            testRects[0].origin.x = placementRect.origin.x + x;
-            testRects[0].origin.y = placementRect.origin.y + placementRect.size.height - y;
-
-            // Top Right
-            testRects[1] = testRects[0];
-            testRects[1].origin.x = placementRect.origin.x + placementRect.size.width - x;
-
-            // Bottom Left
-            testRects[2] = testRects[0];
-            testRects[2].origin.y = placementRect.origin.y + y;
-
-            // Bottom Right
-            testRects[3] = testRects[1];
-            testRects[3].origin.y = placementRect.origin.y + y;
-
-            for (int i = 0; i < sizeof(testRects)/sizeof(NSRect); i++) {
-                PtyLog(@"compute badness of test rect %d %@", i, [NSValue valueWithRect:testRects[i]]);
-
-                iterator = [windows objectEnumerator];
-                PTYWindow* other;
-                float badness = 0.0f;
-                while ((other = [iterator nextObject])) {
-                    NSRect otherFrame = [other frame];
-                    NSRect intersection = NSIntersectionRect(testRects[i], otherFrame);
-                    badness += intersection.size.width * intersection.size.height;
-                    PtyLog(@"badness of %@ is %.2f", other, intersection.size.width * intersection.size.height);
-                }
-
-
-                char const * names[] = {"TL", "TR", "BL", "BR"};
-                PtyLog(@"%s: testRect:%@, bad:%.2f",
-                        names[i], NSStringFromRect(testRects[i]), badness);
-
-                if (badness < bestIntersect) {
-                    PtyLog(@"This is the best coordinate found so far");
-                    bestIntersect = badness;
-                    bestFrame = testRects[i];
-                }
-
-                // Shortcut if we've found an empty spot
-                if (bestIntersect == 0) {
-                    PtyLog(@"zero badness. Done.");
-                    goto end;
-                }
+// Height of built-in titlebar to create.
+- (CGFloat)_titlebarHeight {
+    switch ([self.window.ptyWindow.ptyDelegate ptyWindowTitleBarFlavor]) {
+        case PTYWindowTitleBarFlavorDefault:
+            if ([[[self class] superclass] instancesRespondToSelector:_cmd]) {
+                return [super _titlebarHeight];
             }
-        }
+            return 1;
+        case PTYWindowTitleBarFlavorOnePoint:
+            return 1;
+        case PTYWindowTitleBarFlavorZeroPoints:
+            return 0;
     }
-
-end:
-    [windows release];
-    PtyLog(@"set frame origin to %@", [NSValue valueWithPoint:bestFrame.origin]);
-    [self setFrameOrigin:bestFrame.origin];
-}
-
-- (void)setLayoutDone {
-    PtyLog(@"setLayoutDone %@", [NSThread callStackSymbols]);
-    layoutDone = YES;
-}
-
-- (void)makeKeyAndOrderFront:(id)sender {
-    PtyLog(@"PTYWindow makeKeyAndOrderFront: layoutDone=%d %@", (int)layoutDone, [NSThread callStackSymbols]);
-    if (!layoutDone) {
-        PtyLog(@"try to call windowWillShowInitial");
-        [self setLayoutDone];
-        if ([[self delegate] respondsToSelector:@selector(windowWillShowInitial)]) {
-            [[self delegate] performSelector:@selector(windowWillShowInitial)];
-        } else {
-            PtyLog(@"delegate %@ does not respond", [self delegate]);
-        }
-    }
-    PtyLog(@"PTYWindow - calling makeKeyAndOrderFont, which triggers a window resize");
-    PtyLog(@"The current window frame is %fx%f", [self frame].size.width, [self frame].size.height);
-    [super makeKeyAndOrderFront:sender];
-}
-
-- (BOOL)canBecomeKeyWindow {
-    return YES;
-}
-
-- (double)approximateFractionOccluded {
-    NSArray *orderedWindows = [[NSApplication sharedApplication] orderedWindows];
-    NSUInteger myIndex = [orderedWindows indexOfObject:self];
-    if (myIndex == 0) {
-        return 0;
-    }
-    const int kRows = 3;
-    const int kCols = 3;
-    typedef struct {
-        NSRect rect;
-        double occlusion;
-    } OcclusionPart;
-    OcclusionPart parts[kRows][kCols];
-    NSRect myFrame = [self frame];
-    NSSize partSize = NSMakeSize(myFrame.size.width / kCols, myFrame.size.height / kRows);
-    for (int y = 0; y < kRows; y++) {
-        for (int x = 0; x < kCols; x++) {
-            parts[y][x].rect = NSMakeRect(myFrame.origin.x + x * partSize.width,
-                                          myFrame.origin.y + y * partSize.height,
-                                          partSize.width,
-                                          partSize.height);
-            parts[y][x].occlusion = 0;
-        }
-    }
-    CGFloat pixelsInPart = partSize.width * partSize.height;
-
-    // This loop iterates over each window in front of this one and measures
-    // how much of it intersects each part of this one (a part is one 9th of
-    // the window, as divded into a 3x3 grid). For each part, an occlusion
-    // fraction is tracked, which is the fraction of that part which is covered
-    // by another window. It's approximate because it's the maximum occlusion
-    // for that part by all other windows, so it could be too low (if two
-    // windows each cover different halves of a part, for example).
-    CGFloat totalOcclusion = 0;
-    for (NSUInteger i = 0; i < myIndex; i++) {
-        NSWindow *other = orderedWindows[i];
-        if ([other isMiniaturized] || other.alphaValue < 0.1) {
-            // The other window is almost transparent or miniaturized, so short circuit.
-            continue;
-        }
-        NSRect otherFrame = [other frame];
-        NSRect overallIntersection = NSIntersectionRect(otherFrame, myFrame);
-        if (overallIntersection.size.width < 1 &&
-            overallIntersection.size.height < 1) {
-            // Short circuit--there is no overlap at all.
-            continue;
-        }
-        totalOcclusion = 0;
-        for (int y = 0; y < kRows; y++) {
-            for (int x = 0; x < kCols; x++) {
-                if (parts[y][x].occlusion != 1) {
-                    NSRect intersection = NSIntersectionRect(parts[y][x].rect, otherFrame);
-                    CGFloat pixelsOfOcclusion = intersection.size.width * intersection.size.height;
-                    parts[y][x].occlusion = MAX(parts[y][x].occlusion,
-                                                pixelsOfOcclusion / pixelsInPart);
-                }
-                totalOcclusion += parts[y][x].occlusion / (kRows * kCols);
-            }
-        }
-        if (totalOcclusion > 0.99) {
-            totalOcclusion = 1;
-            break;
-        }
-    }
-
-    return totalOcclusion;
+    assert(NO);
 }
 
 @end
 
+@implementation NSWindow(iTermWindow)
+
+- (id<PTYWindow>)ptyWindow {
+    if ([self conformsToProtocol:@protocol(PTYWindow)]) {
+        return (id<PTYWindow>)self;
+    } else {
+        return nil;
+    }
+}
+
+@end
+
+#define THE_CLASS iTermWindow
+#include "iTermWindowImpl.m"
+#undef THE_CLASS
+
+#define THE_CLASS iTermPanel
+#include "iTermWindowImpl.m"
+#undef THE_CLASS
+
+#define ENABLE_COMPACT_WINDOW_HACK 1
+#define THE_CLASS iTermCompactWindow
+#include "iTermWindowImpl.m"
+#undef THE_CLASS
+
+#define THE_CLASS iTermCompactPanel
+#include "iTermWindowImpl.m"
+#undef THE_CLASS
+
+// NOTE: If you modify this file update PTYWindow+Scripting.m similarly.

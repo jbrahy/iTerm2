@@ -24,16 +24,11 @@ static const NSInteger kRecycleDirectoryTag = 2;
     IBOutlet NSTextField* _paneDirectory;
 }
 
-- (id)init {
+- (instancetype)init {
     return [super initWithWindowNibName:@"AdvancedWorkingDirectoryWindow"];
 }
 
-- (void)dealloc {
-    [_profile release];
-    [super dealloc];
-}
-
-- (NSArray *)allKeys {
+- (NSArray<NSString *> *)allKeys {
     return @[ KEY_AWDS_WIN_OPTION,
               KEY_AWDS_WIN_DIRECTORY,
               KEY_AWDS_TAB_OPTION,
@@ -45,18 +40,18 @@ static const NSInteger kRecycleDirectoryTag = 2;
 #pragma mark - Actions
 
 - (IBAction)ok:(id)sender {
-    NSMutableDictionary *dict = [[_profile mutableCopy] autorelease];
-    
+    NSMutableDictionary *dict = [_profile mutableCopy];
+
     dict[KEY_AWDS_WIN_OPTION] = [self valueForTag:_windowDirectoryType.selectedTag];
     dict[KEY_AWDS_TAB_OPTION] = [self valueForTag:_tabDirectoryType.selectedTag];
     dict[KEY_AWDS_PANE_OPTION] = [self valueForTag:_paneDirectoryType.selectedTag];
-    
+
     dict[KEY_AWDS_WIN_DIRECTORY] = [_windowDirectory stringValue];
     dict[KEY_AWDS_TAB_DIRECTORY] = [_tabDirectory stringValue];
     dict[KEY_AWDS_PANE_DIRECTORY] = [_paneDirectory stringValue];
-    
+
     self.profile = dict;
-    [NSApp endSheet:self.window];
+    [self.window.sheetParent endSheet:self.window];
 }
 
 #pragma mark - Private
@@ -79,30 +74,29 @@ static const NSInteger kRecycleDirectoryTag = 2;
     switch (tag) {
         case kCustomDirectoryTag:
             return kProfilePreferenceInitialDirectoryCustomValue;
-            
+
         case kRecycleDirectoryTag:
             return kProfilePreferenceInitialDirectoryRecycleValue;
 
         case kHomeDirectoryTag:
         default:
             return kProfilePreferenceInitialDirectoryHomeValue;
-            
+
    }
 }
 
 - (void)setProfile:(NSDictionary *)profile {
-    [_profile autorelease];
     _profile = [profile copy];
     [self setAdvancedBookmarkMatrix:_windowDirectoryType
                           withValue:[_profile objectForKey:KEY_AWDS_WIN_OPTION]];
     [self safelySetStringValue:[_profile objectForKey:KEY_AWDS_WIN_DIRECTORY]
                             in:_windowDirectory];
-    
+
     [self setAdvancedBookmarkMatrix:_tabDirectoryType
                           withValue:[_profile objectForKey:KEY_AWDS_TAB_OPTION]];
     [self safelySetStringValue:[_profile objectForKey:KEY_AWDS_TAB_DIRECTORY]
                             in:_tabDirectory];
-    
+
     [self setAdvancedBookmarkMatrix:_paneDirectoryType
                           withValue:[_profile objectForKey:KEY_AWDS_PANE_OPTION]];
     [self safelySetStringValue:[_profile objectForKey:KEY_AWDS_PANE_DIRECTORY]

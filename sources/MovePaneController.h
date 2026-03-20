@@ -9,21 +9,21 @@
 #import <Foundation/Foundation.h>
 #import "SplitSelectionView.h"
 
+extern NSString *const iTermMovePaneDragType;
+extern NSString *const iTermSessionDidChangeTabNotification;
+
+@class PseudoTerminal;
 @class PTYTab;
 @class PTYSession;
 @class SessionView;
-@interface MovePaneController : NSObject <SplitSelectionViewDelegate> {
-    // The session being moved.
-    PTYSession *session_;  // weak
+@interface MovePaneController : NSObject <SplitSelectionViewDelegate>
 
-    BOOL dragFailed_;
-    BOOL didSplit_;
-}
-
+@property (nonatomic, readonly) BOOL isDragInProgress;
+@property (nonatomic, readonly) BOOL dropping;
 @property (nonatomic, assign) BOOL dragFailed;
 @property (nonatomic, assign) PTYSession *session;
 
-+ (MovePaneController *)sharedInstance;
++ (instancetype)sharedInstance;
 // Initiate click-to-move mode.
 - (void)movePane:(PTYSession *)session;
 
@@ -50,8 +50,11 @@
 - (SessionView *)removeAndClearSession;
 - (void)moveSessionToNewWindow:(PTYSession *)movingSession
                        atPoint:(NSPoint)point;
+- (void)moveSession:(PTYSession *)movingSession toTabInWindow:(NSWindow *)window;
 
 // Move the window by |distance|.
 - (void)moveWindowBy:(NSPoint)distance;
+
++ (void)moveTab:(PTYTab *)tab toWindow:(PseudoTerminal *)window atIndex:(NSInteger)index;
 
 @end

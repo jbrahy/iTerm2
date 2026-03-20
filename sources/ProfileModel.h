@@ -24,37 +24,63 @@
 
 #import <Cocoa/Cocoa.h>
 
+#import "iTermProfile.h"
+
+typedef NS_OPTIONS(NSUInteger, ProfileType) {
+    ProfileTypeTerminal = 1,
+    ProfileTypeBrowser = 1 << 1,
+
+    ProfileTypeAll = (ProfileTypeTerminal | ProfileTypeBrowser)
+};
+
+@protocol iTermProfileModelMenuController;
+
 // Notification posted when a stored profile changes.
 extern NSString *const kReloadAddressBookNotification;
 
+// All profiles should be reloaded.
+extern NSString *const kReloadAllProfiles;
+
+// Menu item identifier prefixes for NSMenuItems that open a window/tab
+extern NSString *const iTermProfileModelNewWindowMenuItemIdentifierPrefix;
+extern NSString *const iTermProfileModelNewTabMenuItemIdentifierPrefix;
+extern NSString *const iTermProfileDidChange;
+
 #define BMKEY_BOOKMARKS_ARRAY @"Bookmarks Array"
 
-#define Profile NSDictionary
+@interface ProfileModel : NSObject
 
-typedef struct {
-    SEL selector;                  // normal action
-    SEL alternateSelector;         // opt+click
-    SEL openAllSelector;           // open all bookmarks
-    SEL alternateOpenAllSelector;  // opt+open all bookmarks
-    id target;                     // receiver of selector
-} JournalParams;
+@property(nonatomic, readonly) NSString *modelName;
+@property(nonatomic, strong) id<iTermProfileModelMenuController> menuController;
 
-@interface ProfileModel : NSObject {
-    NSMutableArray* bookmarks_;
-    NSString* defaultBookmarkGuid_;
+- (instancetype)init NS_UNAVAILABLE;
 
-    // The journal is an array of actions since the last change notification was
-    // posted.
-    NSMutableArray* journal_;
-    NSUserDefaults* prefs_;
-    BOOL postChanges_;              // should change notifications be posted?
-}
++ (ProfileModel *)sharedInstance;
++ (ProfileModel *)sessionsInstance;
 
-+ (ProfileModel*)sharedInstance;
-+ (ProfileModel*)sessionsInstance;
+// Executes block with reduced debug logging (skips expensive call stack symbolication).
+// Use for high-frequency operations like tmux title updates.
++ (void)performWithLessLogging:(BOOL)lessLogging block:(void (^NS_NOESCAPE)(void))block;
+
+// Returns compressed ProfileModel log for crash reports.
++ (NSString *)compressedLog;
+
++ (void)updateSharedProfileWithGUID:(NSString *)sharedProfileGUID
+                          newValues:(NSDictionary *)newValues;
+
+
 + (NSString*)freshGuid;
+// Returns a profile suitable for creating a new session based on the given profile.
+// If the source profile is divorced (its guid exists in the sessions instance),
+// returns a copy with a fresh guid to avoid two sessions sharing the same divorced guid.
+// Otherwise, returns the original profile unchanged.
++ (Profile *)profileForCreatingNewSessionBasedOn:(Profile *)profile;
 + (void)migratePromptOnCloseInMutableBookmark:(NSMutableDictionary *)dict;
 + (BOOL)migrated;
++ (NSAttributedString *)attributedStringForCommand:(NSString *)command
+                      highlightingMatchesForFilter:(NSString *)filter
+                                 defaultAttributes:(NSDictionary *)defaultAttributes
+                             highlightedAttributes:(NSDictionary *)highlightedAttributes;
 + (NSAttributedString *)attributedStringForName:(NSString *)name
                    highlightingMatchesForFilter:(NSString *)filter
                               defaultAttributes:(NSDictionary *)defaultAttributes
@@ -67,6 +93,9 @@ typedef struct {
 - (int)numberOfBookmarksWithFilter:(NSString*)filter;
 - (NSArray*)bookmarkIndicesMatchingFilter:(NSString*)filter;
 - (NSArray*)bookmarkIndicesMatchingFilter:(NSString*)filter orGuid:(NSString *)lockedGuid;
+- (NSArray<Profile *> *)profileIndicesMatchingFilter:(NSString *)filter
+                                              orGuid:(NSString *)lockedGuid
+                                              ofType:(ProfileType)profileTypes;
 - (int)indexOfProfileWithGuid:(NSString*)guid;
 - (int)indexOfProfileWithGuid:(NSString*)guid withFilter:(NSString*)filter;
 - (Profile*)profileAtIndex:(int)index;
@@ -82,65 +111,55 @@ typedef struct {
 - (void)removeAllBookmarks;
 - (NSArray*)rawData;
 - (void)load:(NSArray*)prefs;
-- (Profile*)defaultBookmark;
+- (Profile*)defaultBookmark;  // prefer defaultProfile
+- (Profile *)defaultProfile;
+- (Profile *)defaultBrowserProfileCreatingIfNeeded;
+- (Profile *)defaultBrowserProfile;
 - (Profile*)bookmarkWithName:(NSString*)name;
 - (Profile*)bookmarkWithGuid:(NSString*)guid;
 - (int)indexOfBookmarkWithName:(NSString*)name;
 - (NSArray*)allTags;
 - (BOOL)bookmark:(Profile*)bookmark hasTag:(NSString*)tag;
 - (Profile*)setObject:(id)object forKey:(NSString*)key inBookmark:(Profile*)bookmark;
+- (Profile*)setObject:(id)object forKey:(NSString*)key inBookmark:(Profile*)bookmark sideEffects:(BOOL)sideEffects;
+- (Profile *)setObjectsFromDictionary:(NSDictionary *)dictionary inProfile:(Profile *)bookmark;
 - (void)setDefaultByGuid:(NSString*)guid;
 - (void)moveGuid:(NSString*)guid toRow:(int)row;
 - (void)rebuildMenus;
 // Return the absolute index of a bookmark given its index with the filter applied.
 - (int)convertFilteredIndex:(int)theIndex withFilter:(NSString*)filter;
 - (void)dump;
-- (NSArray*)bookmarks;
-- (NSArray*)guids;
-- (void)addBookmark:(Profile*)b toMenu:(NSMenu*)menu startingAtItem:(int)skip withTags:(NSArray*)tags params:(JournalParams*)params atPos:(int)pos;
+- (NSArray<Profile *> *)bookmarks;
+- (NSArray *)guids;
 - (NSArray *)names;
+- (void)addGuidToDebug:(NSString *)guid;
 
 // Updates the profile with guid 'origGuid' by replacing all elements except
 // guid in 'bookmark'. The name is preserved if it is different than the
 // original profile's name.
-- (void)setProfilePreservingGuidWithGuid:(NSString *)origGuid fromProfile:(Profile *)bookmark;
+- (void)setProfilePreservingGuidWithGuid:(NSString *)origGuid
+                             fromProfile:(Profile *)bookmark
+                               overrides:(NSDictionary<NSString *, id> *)overrides;
 
 // Write to user defaults
 - (void)flush;
 
+// Returns the profile to be used for tmux sessions.
+- (Profile *)tmuxProfile;
+
 // Tell all listeners that the model has changed.
 - (void)postChangeNotification;
 
-+ (void)applyJournal:(NSDictionary*)journal
-              toMenu:(NSMenu*)menu
-      startingAtItem:(int)skip
-              params:(JournalParams*)params;
+- (void)performBlockWithCoalescedNotifications:(void (^)(void))block;
+- (void)recordSortOrder;
+- (void)moveProfileWithGuidIfNeededToRespectSortOrder:(NSString *)guid;
 
-+ (void)applyJournal:(NSDictionary*)journal
-              toMenu:(NSMenu*)menu
-              params:(JournalParams*)params;
++ (void)log:(NSString *)message;
 
 @end
 
-typedef enum {
-    JOURNAL_ADD,
-    JOURNAL_REMOVE,
-    JOURNAL_REMOVE_ALL,
-    JOURNAL_SET_DEFAULT
-} JournalAction;
-
-@interface BookmarkJournalEntry : NSObject {
-  @public
-    JournalAction action;
-    NSString* guid;
-    ProfileModel* model;
-    // Tags before the action was applied.
-    NSArray* tags;
-    int index;  // Index of bookmark
-}
-
-+ (BookmarkJournalEntry*)journalWithAction:(JournalAction)action
-                                  bookmark:(Profile*)bookmark
-                                     model:(ProfileModel*)model;
-
+@interface NSDictionary(ProfileModel)
+@property(nonatomic, readonly) ProfileType profileType;
++ (ProfileType)profileTypeForCustomCommand:(id)customCommand;  // pass the value of KEY_CUSTOM_COMMAND
 @end
+

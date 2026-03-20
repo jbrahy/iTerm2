@@ -9,12 +9,16 @@
 
 #import "iTermTipWindowController.h"
 
+#import "NSImage+iTerm.h"
+#import "NSView+iTerm.h"
+#import "NSWorkspace+iTerm.h"
+#import "SolidColorView.h"
+#import "iTermCarbonHotKeyController.h"
+#import "iTermFlippedView.h"
 #import "iTermTip.h"
 #import "iTermTipCardActionButton.h"
 #import "iTermTipCardViewController.h"
-#import "iTermFlippedView.h"
-#import "NSView+iTerm.h"
-#import "SolidColorView.h"
+#import "iTermUserDefaults.h"
 
 #import <QuartzCore/QuartzCore.h>
 
@@ -24,20 +28,26 @@ static NSString *const kFewerOptionsTitle = @"Fewer Options";
 static NSString *const kMoreOptionsTitle = @"More Options";
 static NSString *const kShowThisLaterTitle = @"Show This Later";
 static NSString *const kDisableTipsTitle = @"Disable Tips";
-static NSString *const kReallyDisableTipsTitle = @"Click Again to Disable Tips";
+static NSString *const kEnableTipsTitle = @"Enable Tips";
 static NSString *const kShowNextTipTitle = @"Show Next Tip";
 static NSString *const kShowPreviousTipTitle = @"Show Previous Tip";
+static NSString *const kShowTipsWeeklyTitle = @"Show Tips Weekly";
+static NSString *const kShowTipsDailyTitle = @"Show Tips Daily";
+static NSString *const kShareTitle = @"Share";
 
 static const CGFloat kWindowWidth = 400;
 
+static const CGFloat kWindowLeftMargin = 8;
+static const CGFloat kWindowTopMargin = 8;
+
 @interface iTermTipWindowController()<NSWindowDelegate>
 
-@property(nonatomic, retain) iTermTipCardViewController *cardViewController;
-@property(nonatomic, retain) iTermTip *tip;
+@property(nonatomic, strong) iTermTipCardViewController *cardViewController;
+@property(nonatomic, strong) iTermTip *tip;
 
 // This is a layer-backed view that contains the card because the contentView
 // can't be layer backed and clear.
-@property(nonatomic, retain) NSView *intermediateView;
+@property(nonatomic, strong) NSView *intermediateView;
 
 // Can the window shrink now? Window shrinking is desirable to prevent when
 // the card's size is animating down but the window oughtn't shrink til the
@@ -60,12 +70,15 @@ static const CGFloat kWindowWidth = 400;
 
     // Cards that are animating out. In practice this can have up to 1 element.
     NSMutableArray *_exitingCardViewControllers;
+
+    iTermHotKey *_hotKey;
+    BOOL _dragging;
 }
 
 - (instancetype)initWithTip:(id)tip {
     self = [self init];
     if (self) {
-        _tip = [tip retain];
+        _tip = tip;
     }
     return self;
 }
@@ -79,19 +92,23 @@ static const CGFloat kWindowWidth = 400;
     return self;
 }
 
-- (void)dealloc {
-    [_tip release];
-    [_cardViewController release];
-    [_intermediateView release];
-    [_exitingCardViewControllers release];
-    [super dealloc];
+- (void)awakeFromNib {
+    self.window.backgroundColor = [NSColor clearColor];
+    [super awakeFromNib];
 }
 
 // Expanded means the "more options" is open.
 - (void)loadCardExpanded:(BOOL)expanded {
     iTermTipCardViewController *card =
-        [[[iTermTipCardViewController alloc] initWithNibName:@"iTermTipCardViewController"
-                                                      bundle:nil] autorelease];
+    [[iTermTipCardViewController alloc] initWithNibName:@"iTermTipCardViewController"
+                                                 bundle:[NSBundle bundleForClass:self.class]];
+    __weak __typeof(self) weakSelf = self;
+    card.willDrag = ^{
+        [weakSelf willDrag];
+    };
+    card.didDrag = ^{
+        [weakSelf didDrag];
+    };
     self.cardViewController = card;
     [card view];
     card.titleString = self.tip.title;
@@ -100,74 +117,168 @@ static const CGFloat kWindowWidth = 400;
     [self addButtonsToCard:card expanded:expanded];
     [_intermediateView addSubview:_cardViewController.view];
     [self layoutCard:card animated:NO];
+
+    NSView *view = card.view;
+    while (view.superview) {
+        view.superview.accessibilityChildren = @[view];
+        view.accessibilityElement = NO;
+        view = view.superview;
+    }
+
+}
+
+- (void)willDrag {
+    _dragging = YES;
+}
+
+- (void)didDrag {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self saveWindowPosition];
+    });
+    _dragging = NO;
+}
+
+- (void)windowDidMove:(NSNotification *)notification {
+    if (_dragging) {
+        [self saveWindowPosition];
+    }
+}
+
+- (void)saveWindowPosition {
+    if (!self.window) {
+        return;
+    }
+    const NSRect frame = self.window.frame;
+    const NSRect screenFrame = self.window.screen.visibleFrame;
+    const NSSize offset = NSMakeSize(NSMinX(frame) - NSMinX(screenFrame) - kWindowLeftMargin,
+                                     NSMaxY(screenFrame) - NSMaxY(frame) - kWindowTopMargin);
+    [[iTermUserDefaults userDefaults] setObject:NSStringFromSize(offset) forKey:@"NoSyncTipOfTheDayOffset"];
+}
+
+- (NSSize)windowOffset {
+    return NSSizeFromString([[iTermUserDefaults userDefaults] objectForKey:@"NoSyncTipOfTheDayOffset"]);
 }
 
 // Add the standard buttons.
 - (void)addButtonsToCard:(iTermTipCardViewController *)card expanded:(BOOL)expanded {
     if (_tip.url) {
         [card addActionWithTitle:kLearnMoreTitle
-                            icon:[NSImage imageNamed:@"Navigate"]
+                            icon:[NSImage it_imageNamed:@"Navigate" forClass:self.class]
                            block:^(id sendingCard) {
-                               [self openURL];
-                           }];
+            [self openURL];
+        }];
     }
     [card addActionWithTitle:kDismissTipTitle
-                        icon:[NSImage imageNamed:@"Dismiss"]
+                    shortcut:@"⎋"
+                        icon:[NSImage it_imageNamed:@"Dismiss" forClass:self.class]
                        block:^(id sendingCard) {
-                           [self dismiss];
-                       }];
+        [self dismiss];
+    }];
 
     NSString *toggleTitle = expanded ? kFewerOptionsTitle : kMoreOptionsTitle;
     iTermTipCardActionButton *button =
-        [card addActionWithTitle:toggleTitle
-                            icon:[NSImage imageNamed:@"ChevronDown"]
-                           block:^(id sendingCard) {
-                               [self toggleOptionsInCard:sendingCard];
-                           }];
+    [card addActionWithTitle:toggleTitle
+                        icon:[NSImage it_imageNamed:@"ChevronDown" forClass:self.class]
+                       block:^(id sendingCard) {
+        [self toggleOptionsInCard:sendingCard];
+    }];
     [button setIconFlipped:expanded];
 
     button =
-        [card addActionWithTitle:kShowThisLaterTitle
-                            icon:[NSImage imageNamed:@"Later"]
-                           block:^(id sendingCard) {
-                               [self showThisLater];
-                           }];
+    [card addActionWithTitle:kShowThisLaterTitle
+                        icon:[NSImage it_imageNamed:@"Later" forClass:self.class]
+                       block:^(id sendingCard) {
+        [self showThisLater];
+    }];
     if (!expanded) {
         [button setCollapsed:YES];
     }
+
+
+    NSImage *shareTemplate = [NSImage imageNamed:NSImageNameShareTemplate];
+    shareTemplate.template = YES;
+    NSImage *shareImage = [shareTemplate copy];
+    CGFloat aspectRatio = shareImage.size.width / shareImage.size.height;
+    const CGFloat standardHeight = 22;
+    [shareImage setSize:NSMakeSize(aspectRatio * standardHeight, standardHeight)];
+    [shareImage lockFocus];
+    [[iTermTipCardActionButton blueColor] set];
+    NSRectFillUsingOperation(NSMakeRect(0, 0, shareImage.size.width, shareImage.size.height),
+                             NSCompositingOperationSourceAtop);
+    [shareImage unlockFocus];
+    shareImage.template = NO;
+
     button =
-        [card addActionWithTitle:kDisableTipsTitle
-                            icon:[NSImage imageNamed:@"DisableTips"]
-                           block:^(id sendingCard) {
-                               iTermTipCardActionButton *theButton = [card actionWithTitle:kDisableTipsTitle];
-                               if (theButton) {
-                                   [theButton setTitle:kReallyDisableTipsTitle];
-                               } else {
-                                   [self disableTips];
-                               }
-                           }];
+    [card addActionWithTitle:kShareTitle icon:shareImage block:^(id card) {
+        [self shareThis:card];
+    }];
+    if (!expanded) {
+        [button setCollapsed:YES];
+    }
+
+    NSString *frequencyTitle;
+    if ([_delegate tipFrequencyIsHigh]) {
+        frequencyTitle = kShowTipsWeeklyTitle;
+    } else {
+        frequencyTitle = kShowTipsDailyTitle;
+    }
+    button =
+    [card addActionWithTitle:frequencyTitle
+                        icon:[NSImage it_imageNamed:@"TipCalendar" forClass:self.class]
+                       block:^(id sendingCard) {
+        [self->_delegate toggleTipFrequency];
+        iTermTipCardActionButton *theButton = [[iTermTipCardViewController castFrom:sendingCard] actionWithTitle:kShowTipsWeeklyTitle];
+        if (theButton) {
+            [theButton setTitle:kShowTipsDailyTitle];
+        } else {
+            theButton = [card actionWithTitle:kShowTipsDailyTitle];
+            [theButton setTitle:kShowTipsWeeklyTitle];
+        }
+    }];
+    if (!expanded) {
+        [button setCollapsed:YES];
+    }
+
+    NSString *enableOrDisableTitle;
+    if ([_delegate tipWindowTipsAreDisabled]) {
+        enableOrDisableTitle = kEnableTipsTitle;
+    } else {
+        enableOrDisableTitle = kDisableTipsTitle;
+    }
+    button =
+    [card addActionWithTitle:enableOrDisableTitle
+                        icon:[NSImage it_imageNamed:@"DisableTips" forClass:self.class]
+                       block:^(id sendingCard) {
+        if (![self->_delegate tipWindowTipsAreDisabled]) {
+            [self disableTips];
+        } else {
+            iTermTipCardActionButton *theButton = [[iTermTipCardViewController castFrom:sendingCard] actionWithTitle:kEnableTipsTitle];
+            [self enableTips];
+            [theButton setTitle:kDisableTipsTitle];
+        }
+    }];
     if (!expanded) {
         [button setCollapsed:YES];
     }
 
     if ([_delegate tipWindowTipAfterTipWithIdentifier:self.tip.identifier]) {
         button =
-            [card addActionWithTitle:kShowNextTipTitle
-                                icon:[NSImage imageNamed:@"NextTip"]
-                               block:^(id sendingCard) {
-                                   [self showNextTip];
-                               }];
+        [card addActionWithTitle:kShowNextTipTitle
+                            icon:[NSImage it_imageNamed:@"NextTip" forClass:self.class]
+                           block:^(id sendingCard) {
+            [self showNextTip];
+        }];
         if (!expanded) {
             [button setCollapsed:YES];
         }
     }
     if ([_delegate tipWindowTipBeforeTipWithIdentifier:self.tip.identifier]) {
         button =
-            [card addActionWithTitle:kShowPreviousTipTitle
-                                icon:[NSImage imageNamed:@"NextTip"]
-                               block:^(id sendingCard) {
-                                   [self showPreviousTip];
-                               }];
+        [card addActionWithTitle:kShowPreviousTipTitle
+                            icon:[NSImage it_imageNamed:@"NextTip" forClass:self.class]
+                           block:^(id sendingCard) {
+            [self showPreviousTip];
+        }];
         [button setIconFlipped:YES];
         if (!expanded) {
             [button setCollapsed:YES];
@@ -191,28 +302,33 @@ static const CGFloat kWindowWidth = 400;
     }
 }
 
-// Action button titles that are collapsable. These must appear adjacently and last.
+// Action button titles that are collapsible. These must appear adjacently and last.
 - (NSArray *)collapsingTitles {
     return @[ kShowThisLaterTitle,
+              kShareTitle,
               kDisableTipsTitle,
-              kReallyDisableTipsTitle,
+              kEnableTipsTitle,
+              kShowTipsDailyTitle,
+              kShowTipsWeeklyTitle,
               kShowNextTipTitle,
               kShowPreviousTipTitle ];
 }
 
 // I originally preferred to do this in windowDidLoad, but the window's frame
 // changes right after windowDidLoad returns.
-- (void)showTipWindow {
+- (NSArray<iTermHotKey *> *)showTipWindow {
     [self.window orderFront:nil];
 
     self.window.level = NSModalPanelWindowLevel;
+    self.window.accessibilityElement = YES;
+    self.window.accessibilityLabel = @"iTerm2 Tip of the Day";
     self.window.opaque = NO;
     self.window.alphaValue = 0;
 
     NSView *contentView = self.window.contentView;
     contentView.autoresizesSubviews = YES;
 
-    self.intermediateView = [[[iTermFlippedView alloc] initWithFrame:[self.window.contentView bounds]] autorelease];
+    self.intermediateView = [[iTermFlippedView alloc] initWithFrame:[self.window.contentView bounds]];
     [_intermediateView setWantsLayer:YES];
     _intermediateView.layer.opaque = NO;
     _intermediateView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -224,6 +340,25 @@ static const CGFloat kWindowWidth = 400;
 
     // Animate in the window.
     [self present];
+
+    if (!_hotKey) {
+        NSString *characters = [NSString stringWithFormat:@"%c", 27];
+        iTermShortcut *shortcut = [[iTermShortcut alloc] initWithKeyCode:kVK_Escape
+                                                              hasKeyCode:YES
+                                                               modifiers:0
+                                                              characters:characters
+                                             charactersIgnoringModifiers:characters];
+        _hotKey = [[iTermCarbonHotKeyController sharedInstance] registerShortcut:shortcut
+                                                                          target:self
+                                                                        selector:@selector(dismissByKeyboard:)
+                                                                        userData:nil];
+    }
+    return nil;
+}
+
+- (NSArray *)dismissByKeyboard:(id)sender {
+    [self dismiss];
+    return nil;
 }
 
 // Update the card's size.
@@ -235,11 +370,10 @@ static const CGFloat kWindowWidth = 400;
     frame.size.height = MAX(frame.size.height, card.view.frame.size.height);
     frame.origin = NSZeroPoint;
 
-    static const CGFloat kWindowLeftMargin = 8;
-    static const CGFloat kWindowTopMargin = 24;
     NSRect screenFrame = self.window.screen.visibleFrame;
-    NSRect windowFrame = NSMakeRect(NSMinX(screenFrame) + kWindowLeftMargin,
-                                    NSMaxY(screenFrame) - NSHeight(frame) - kWindowTopMargin,  // In case menu bar is hidden and later becomes visible
+    const NSSize offset = [self windowOffset];
+    NSRect windowFrame = NSMakeRect(NSMinX(screenFrame) + kWindowLeftMargin + offset.width,
+                                    NSMaxY(screenFrame) - NSHeight(frame) - kWindowTopMargin - offset.height,  // In case menu bar is hidden and later becomes visible
                                     frame.size.width,
                                     frame.size.height);
     [self setWindowFrame:windowFrame];
@@ -249,28 +383,31 @@ static const CGFloat kWindowWidth = 400;
         // Disable buttons until animation is done.
         self.buttonsEnabled = NO;
         CGFloat heightChange = card.postAnimationFrame.size.height - card.view.frame.size.height;
-        NSRect finalWindowFrame = NSMakeRect(NSMinX(screenFrame) + kWindowLeftMargin,
-                                             NSMaxY(screenFrame) - NSHeight(postAnimationFrame) - kWindowTopMargin,
+        const NSSize offset = [self windowOffset];
+        NSRect finalWindowFrame = NSMakeRect(NSMinX(screenFrame) + kWindowLeftMargin + offset.width,
+                                             NSMaxY(screenFrame) - NSHeight(postAnimationFrame) - kWindowTopMargin - offset.height,
                                              postAnimationFrame.size.width,
                                              postAnimationFrame.size.height);
 
-        [self retain];
         [card animateCardWithDuration:0.25
                          heightChange:heightChange
                     originalCardFrame:originalCardFrame
                    postAnimationFrame:postAnimationFrame
                        superviewWidth:kWindowWidth
                                 block:^() {
-                                    [self setWindowFrame:finalWindowFrame];
-                                    self.buttonsEnabled = YES;
-                                    [self release];
-                                }];
+            [self setWindowFrame:finalWindowFrame];
+            self.buttonsEnabled = YES;
+        }];
     }
 }
 
 #pragma mark - User Actions
 
 - (void)dismiss {
+    if (_hotKey) {
+        [[iTermCarbonHotKeyController sharedInstance] unregisterHotKey:_hotKey];
+        _hotKey = nil;
+    }
     [self animateOut];
     [_delegate tipWindowDismissed];
 }
@@ -281,23 +418,50 @@ static const CGFloat kWindowWidth = 400;
     NSTimeInterval duration = 0.35;
     [[NSAnimationContext currentContext] setDuration:duration];
     [[NSAnimationContext currentContext] setTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
-    [self retain];
     self.buttonsEnabled = NO;
     [[NSAnimationContext currentContext] setCompletionHandler:^{
         self.buttonsEnabled = YES;
         [self close];
         // Buttons hold references to us.
-        for (iTermTipCardActionButton *button in _cardViewController.actionButtons) {
+        for (iTermTipCardActionButton *button in self->_cardViewController.actionButtons) {
             button.block = nil;
         }
-        [self release];
     }];
     [_cardViewController.view.animator setFrame:newFrame];
 }
 
 - (void)openURL {
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:self.tip.url]];
+    [[NSWorkspace sharedWorkspace] it_openURL:[NSURL URLWithString:self.tip.url]
+                                       target:nil
+                                        style:iTermOpenStyleTab
+                                       window:nil];
     [self dismiss];
+}
+
+// NOTE: the NSSharingServicePicker has a few problems, so I don't use it.
+// 1) It complains if you use it on mouseUp
+// 2) It does not work (when you tell it to performWithItems it just gets slow but does nothing).
+//    I'm sure this can be fixed but I don't have the time today.
+// It has a nice link to Settings for "more" but I can live without it.
+- (void)shareThis:(iTermTipCardViewController *)card {
+    NSAttributedString *item = [self.tip attributedString];
+    NSArray<NSSharingService *> *services = [NSSharingService sharingServicesForItems:@[ item ]];
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Sharing Services"];
+    for (NSSharingService *service in services) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:service.title
+                                                      action:@selector(shareWithService:)
+                                               keyEquivalent:@""];
+        item.image = service.image;
+        item.representedObject = service;
+        [menu addItem:item];
+    }
+    [NSMenu popUpContextMenu:menu withEvent:[NSApp currentEvent] forView:self.window.contentView];
+}
+
+- (void)shareWithService:(NSMenuItem *)menuItem {
+    NSSharingService *service = menuItem.representedObject;
+    [service performWithItems:@[ self.tip.attributedString ]];
 }
 
 - (void)toggleOptionsInCard:(iTermTipCardViewController *)card {
@@ -307,8 +471,11 @@ static const CGFloat kWindowWidth = 400;
         [action setIconFlipped:YES];
         [action setTitle:kFewerOptionsTitle];
         [[card actionWithTitle:kShowThisLaterTitle] setAnimationState:kTipCardButtonAnimatingIn];
+        [[card actionWithTitle:kShareTitle] setAnimationState:kTipCardButtonAnimatingIn];
         [[card actionWithTitle:kDisableTipsTitle] setAnimationState:kTipCardButtonAnimatingIn];
-        [[card actionWithTitle:kReallyDisableTipsTitle] setAnimationState:kTipCardButtonAnimatingIn];
+        [[card actionWithTitle:kEnableTipsTitle] setAnimationState:kTipCardButtonAnimatingIn];
+        [[card actionWithTitle:kShowTipsWeeklyTitle] setAnimationState:kTipCardButtonAnimatingIn];
+        [[card actionWithTitle:kShowTipsDailyTitle] setAnimationState:kTipCardButtonAnimatingIn];
         [[card actionWithTitle:kShowNextTipTitle] setAnimationState:kTipCardButtonAnimatingIn];
         [[card actionWithTitle:kShowPreviousTipTitle] setAnimationState:kTipCardButtonAnimatingIn];
     } else {
@@ -317,8 +484,11 @@ static const CGFloat kWindowWidth = 400;
         [action setIconFlipped:NO];
         [action setTitle:kMoreOptionsTitle];
         [[card actionWithTitle:kShowThisLaterTitle] setAnimationState:kTipCardButtonAnimatingOut];
+        [[card actionWithTitle:kShareTitle] setAnimationState:kTipCardButtonAnimatingOut];
         [[card actionWithTitle:kDisableTipsTitle] setAnimationState:kTipCardButtonAnimatingOut];
-        [[card actionWithTitle:kReallyDisableTipsTitle] setAnimationState:kTipCardButtonAnimatingOut];
+        [[card actionWithTitle:kEnableTipsTitle] setAnimationState:kTipCardButtonAnimatingOut];
+        [[card actionWithTitle:kShowTipsWeeklyTitle] setAnimationState:kTipCardButtonAnimatingOut];
+        [[card actionWithTitle:kShowTipsDailyTitle] setAnimationState:kTipCardButtonAnimatingOut];
         [[card actionWithTitle:kShowNextTipTitle] setAnimationState:kTipCardButtonAnimatingOut];
         [[card actionWithTitle:kShowPreviousTipTitle] setAnimationState:kTipCardButtonAnimatingOut];
     }
@@ -328,6 +498,10 @@ static const CGFloat kWindowWidth = 400;
 - (void)showThisLater {
     [self animateOut];
     [_delegate tipWindowPostponed];
+}
+
+- (void)enableTips {
+    [_delegate tipWindowRequestsEnable];
 }
 
 - (void)disableTips {
@@ -358,14 +532,12 @@ static const CGFloat kWindowWidth = 400;
 
     iTermTipCardViewController *exitingCardViewController = _cardViewController;
 
-    [self retain];
     [[NSAnimationContext currentContext] setCompletionHandler:^{
         // Kill old card and go back to normal behavior.
         [exitingCardViewController.view removeFromSuperview];
-        [_exitingCardViewControllers removeObject:exitingCardViewController];
+        [self->_exitingCardViewControllers removeObject:exitingCardViewController];
         self.buttonsEnabled = YES;
         self.windowCanShrink = YES;
-        [self release];
     }];
 
     // Move old card to the side, out of the window.
@@ -386,6 +558,12 @@ static const CGFloat kWindowWidth = 400;
     // Card moved to exitingCardViewControllers while buttons are disabled so buttons will
     // never be enabled in this card again.
     [_exitingCardViewControllers addObject:_cardViewController];
+    // Prevent buttons in exiting card from being used after card is torn down
+    for (iTermTipCardActionButton *button in exitingCardViewController.actionButtons) {
+        button.block = nil;
+        button.target = nil;
+        button.action = nil;
+    }
     _cardViewController = nil;
     [self loadCardExpanded:expanded];
 
@@ -425,6 +603,9 @@ static const CGFloat kWindowWidth = 400;
 
     if (_holdWindowSizeCount == 0 && _desiredWindowFrame.size.width > 0) {
         // Have a saved window shrink.
+        const NSSize offset = [self windowOffset];
+        _desiredWindowFrame.origin.x += offset.width;
+        _desiredWindowFrame.origin.y -= offset.height;
         [self.window setFrame:_desiredWindowFrame display:NO];
         _desiredWindowFrame.size.width = 0;
     }
@@ -440,6 +621,9 @@ static const CGFloat kWindowWidth = 400;
         _desiredWindowFrame = NSZeroRect;
     } else {
         _desiredWindowFrame = frame;
+        const NSSize offset = [self windowOffset];
+        _desiredWindowFrame.origin.x -= offset.width;
+        _desiredWindowFrame.origin.y += offset.height;
     }
 }
 

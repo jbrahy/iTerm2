@@ -8,7 +8,8 @@
 
 #import "MarkTrigger.h"
 #import "PTYScrollView.h"
-#import "PTYSession.h"
+#import "iTerm2SharedARC-Swift.h"
+#import "SessionView.h"
 
 // Whether to stop scrolling.
 typedef enum {
@@ -22,7 +23,11 @@ typedef enum {
     return @"Set Mark";
 }
 
-- (NSString *)paramPlaceholder {
+- (NSString *)description {
+    return [NSString stringWithFormat:@"Set Mark and %@ scrolling", [self shouldStopScrolling] ? @"stop" : @"continue"];
+}
+
+- (NSString *)triggerOptionalParameterPlaceholderWithInterpolation:(BOOL)interpolation {
     return @"";
 }
 
@@ -34,10 +39,20 @@ typedef enum {
     return YES;
 }
 
-- (int)indexOfTag:(int)theTag {
+- (BOOL)isIdempotent {
+    return YES;
+}
+
+- (NSSet<NSNumber *> *)allowedMatchTypes {
+    NSMutableSet *set = [NSMutableSet setWithObject:@(iTermTriggerMatchTypeRegex)];
+    [set unionSet:[iTermEventTriggerMatchTypeHelper allEventTypesSet]];
+    return set;
+}
+
+- (NSInteger)indexForObject:(id)object {
     int i = 0;
     for (NSNumber *n in [self objectsSortedByValueInDict:[self menuItemsForPoupupButton]]) {
-        if ([n intValue] == theTag) {
+        if ([n isEqual:object]) {
             return i;
         }
         i++;
@@ -45,16 +60,16 @@ typedef enum {
     return -1;
 }
 
-- (int)tagAtIndex:(int)index {
+- (id)objectAtIndex:(NSInteger)index {
     int i = 0;
 
     for (NSNumber *n in [self objectsSortedByValueInDict:[self menuItemsForPoupupButton]]) {
         if (i == index) {
-            return [n intValue];
+            return n;
         }
         i++;
     }
-    return -1;
+    return nil;
 }
 
 - (NSDictionary *)menuItemsForPoupupButton
@@ -67,22 +82,24 @@ typedef enum {
     return [self.param intValue] == kMarkTriggerParamTagStopScrolling;
 }
 
-- (BOOL)performActionWithCapturedStrings:(NSString *const *)capturedStrings
+- (BOOL)performActionWithCapturedStrings:(NSArray<NSString *> *)stringArray
                           capturedRanges:(const NSRange *)capturedRanges
-                            captureCount:(NSInteger)captureCount
-                               inSession:(PTYSession *)aSession
+                               inSession:(id<iTermTriggerSession>)aSession
                                 onString:(iTermStringLine *)stringLine
                     atAbsoluteLineNumber:(long long)lineNumber
+                        useInterpolation:(BOOL)useInterpolation
                                     stop:(BOOL *)stop {
-    [aSession.screen terminalSaveScrollPositionWithArgument:@"saveCursorLine"];
-    if ([self shouldStopScrolling]) {
-        [(PTYScroller *)[aSession.scrollview verticalScroller] setUserScroll:YES];
-    }
+    [aSession triggerSession:self saveCursorLineAndStopScrolling:[self shouldStopScrolling]];
     return YES;
 }
 
 - (int)defaultIndex {
-    return [self indexOfTag:kMarkTriggerParamTagKeepScrolling];
+    return [self indexForObject:@(kMarkTriggerParamTagKeepScrolling)];
+}
+
+- (NSAttributedString *)paramAttributedString {
+    NSString *message = self.shouldStopScrolling ? @"and stop scrolling" : @"";
+    return [[NSAttributedString alloc] initWithString:message attributes:self.regularAttributes];
 }
 
 @end

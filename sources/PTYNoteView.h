@@ -10,19 +10,19 @@
 
 @class PTYNoteViewController;
 
-typedef enum {
+typedef NS_ENUM(NSInteger, PTYNoteViewTipEdge) {
     kPTYNoteViewTipEdgeLeft,
     kPTYNoteViewTipEdgeTop,
     kPTYNoteViewTipEdgeRight,
     kPTYNoteViewTipEdgeBottom
-} PTYNoteViewTipEdge;
+};
 
-@protocol PTYNoteViewDelegate
+@protocol PTYNoteViewDelegate <NSObject>
 - (PTYNoteViewController *)noteViewController;
 - (void)killNote;
 @end
 
-@interface PTYNoteView : NSView {
+@interface PTYNoteView : NSView<NSGestureRecognizerDelegate> {
     PTYNoteViewController *noteViewController_;  // weak
     BOOL dragRight_;
     BOOL dragBottom_;
@@ -43,6 +43,7 @@ typedef enum {
 @property(nonatomic, retain) NSView *contentView;
 @property(nonatomic, assign) PTYNoteViewTipEdge tipEdge;
 @property(nonatomic, retain) NSColor *backgroundColor;
+@property(nonatomic, readonly) BOOL heightChangedManually;
 
 - (NSColor *)defaultBackgroundColor;
 - (void)layoutSubviews;

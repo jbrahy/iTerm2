@@ -8,15 +8,14 @@
 
 #import <Cocoa/Cocoa.h>
 
-@interface PopupWindow : NSWindow
+@interface PopupWindow : NSPanel
 
-- (id)initWithContentRect:(NSRect)contentRect
-                styleMask:(NSUInteger)aStyle
-                  backing:(NSBackingStoreType)bufferingType
-                    defer:(BOOL)flag;
-- (void)setParentWindow:(NSWindow*)parentWindow;
-- (BOOL)canBecomeKeyWindow;
-- (void)keyDown:(NSEvent *)event;
+// I should really make this weak. I think there's enough hacks in place to
+// prevent a leak. Some day when I have lots of free time I can arcify
+// PseudoTerminal :)
+@property (nonatomic, retain) NSWindow *owningWindow;
+
 - (void)shutdown;
+- (void)closeWithoutAdjustingWindowOrder;
 
 @end

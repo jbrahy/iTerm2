@@ -7,45 +7,80 @@
 //
 
 #import "PreferenceInfo.h"
+#import "PreferencePanel.h"
 
-@implementation PreferenceInfo
+#import "iTerm2SharedARC-Swift.h"
+#import "iTermUserDefaultsObserver.h"
+
+@implementation PreferenceInfo {
+    iTermUserDefaultsObserver *_userDefaultsObserver;
+    iTermProfilePreferenceObserver *_profileObserver;
+}
 
 + (instancetype)infoForPreferenceWithKey:(NSString *)key
                                     type:(PreferenceInfoType)type
-                                 control:(NSControl *)control {
-    PreferenceInfo *info = [[[self alloc] init] autorelease];
+                                 control:(NSView *)control {
+    PreferenceInfo *info = [[self alloc] init];
     info.key = key;
     info.type = type;
     info.control = control;
+    info->_searchKeywords = @[ key ];
     return info;
 }
 
-- (id)init {
+- (instancetype)init {
     self = [super init];
     if (self) {
         _range = NSMakeRange(0, INT_MAX);
+        // Observers' initial execution happens from the notification because it gives the current
+        // profile a chance to get set before the observer runs.
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(preferencePanelDidLoad:)
+                                                     name:kPreferencePanelDidLoadNotification
+                                                   object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
-    [_key release];
-    [_control release];
-    [_shouldBeEnabled release];
-    [_onChange release];
-    [_customSettingChangedHandler release];
-    [super dealloc];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)setObserver:(void (^)())observer {
-    [_observer autorelease];
+- (void)setObserver:(void (^)(void))observer {
     _observer = [observer copy];
-    // Call the observer after a delayed perform so that the current profile can be set and then the
-    // control's value gets initialized.
-    [self performSelector:@selector(callObserver) withObject:nil afterDelay:0];
 }
 
-- (void)callObserver {
+- (void)addShouldBeEnabledDependencyOnSetting:(NSString *)key controller:(id<PreferenceController>)controller {
+    __weak __typeof(controller) weakController = controller;
+    __weak __typeof(self) weakSelf = self;
+    if ([controller profileModel]) {
+        if (!_profileObserver) {
+            _profileObserver = [controller profileObserver];
+        }
+        [_profileObserver observeKey:key block:^(id before, id after) {
+            __strong __typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            [weakController updateEnabledStateForInfo:strongSelf];
+        }];
+        return;
+    }
+    if (!_userDefaultsObserver) {
+        _userDefaultsObserver = [[iTermUserDefaultsObserver alloc] init];
+    }
+    [_userDefaultsObserver observeKey:key block:^{
+        __strong __typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [weakController updateEnabledStateForInfo:strongSelf];
+    }];
+}
+
+#pragma mark - Notifications
+
+- (void)preferencePanelDidLoad:(NSNotification *)notification {
     if (self.observer) {
         self.observer();
     }

@@ -14,4 +14,20 @@
     return YES;
 }
 
+- (NSTimeInterval)animationResizeTime:(NSRect)newWindowFrame {
+    return 0.05;
+}
+
+- (BOOL)autoHidesHotKeyWindow {
+    return NO;
+}
+
+- (BOOL)disableFocusFollowsMouse {
+    return YES;
+}
+
+- (BOOL)implementsDisableFocusFollowsMouse {
+    return YES;
+}
+
 @end

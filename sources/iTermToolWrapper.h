@@ -8,45 +8,80 @@
 
 #import <Cocoa/Cocoa.h>
 
+#import "iTermKeyBindingAction.h"
+#import "ProfileModel.h"
+
 @class CapturedOutput;
-@class iTermMark;
-@class VT100RemoteHost;
+@class iTermAction;
+@protocol iTermMark;
+@class iTermToolSnippets;
+@protocol ProcessInfoProvider;
 @class ToolCommandHistoryView;
+@protocol VT100ScreenMarkReading;
+@protocol VT100RemoteHostReading;
+@class iTermCommandHistoryCommandUseMO;
+@protocol iTermGenericNamedMarkReading;
+@class ToolNamedMarks;
 @class iTermToolWrapper;
-@class VT100ScreenMark;
+@class iTermToolCodecierge;
 
 @protocol iTermToolbeltViewDelegate<NSObject>
 
 - (CGFloat)growToolbeltBy:(CGFloat)amount;
+// Dragging of the toolbelt's handle finished.
+- (void)toolbeltDidFinishGrowing;
 - (void)toolbeltUpdateMouseCursor;
 - (void)toolbeltInsertText:(NSString *)text;
-- (VT100RemoteHost *)toolbeltCurrentHost;
+- (id<VT100RemoteHostReading>)toolbeltCurrentHost;
 - (pid_t)toolbeltCurrentShellProcessId;
-- (VT100ScreenMark *)toolbeltLastCommandMark;
-- (void)toolbeltDidSelectMark:(iTermMark *)mark;
+- (id<ProcessInfoProvider>)toolbeltCurrentShellProcessInfoProvider;
+- (id<VT100ScreenMarkReading>)toolbeltLastCommandMark;
+- (void)toolbeltDidSelectMark:(id<iTermMark>)mark;
+- (void)toolbeltDidSelectNamedMark:(id<iTermGenericNamedMarkReading>)mark;
 - (void)toolbeltActivateTriggerForCapturedOutputInCurrentSession:(CapturedOutput *)capturedOutput;
 - (BOOL)toolbeltCurrentSessionHasGuid:(NSString *)guid;
-- (NSArray *)toolbeltCommandUsesForCurrentSession;
+- (NSString *)toolbeltCurrentSessionGUID;
+- (NSArray<iTermCommandHistoryCommandUseMO *> *)toolbeltCommandUsesForCurrentSession;
+- (void)toolbeltApplyActionToCurrentSession:(iTermAction *)action;
+- (void)toolbeltOpenAdvancedPasteWithString:(NSString *)text escaping:(iTermSendTextEscaping)escaping;
+- (void)toolbeltOpenComposerWithString:(NSString *)text escaping:(iTermSendTextEscaping)escaping;
+- (void)toolbeltAddNamedMark;
+- (void)toolbeltRemoveNamedMark:(id<iTermGenericNamedMarkReading>)mark;
+- (void)toolbeltRenameNamedMark:(id<iTermGenericNamedMarkReading>)mark to:(NSString *)newName;
+- (NSArray<NSString *> *)toolbeltSnippetTags;
+- (void)toolbeltMakeCurrentSessionFirstResponder;
+- (BOOL)toolbeltCurrentSessionIsBrowser;
+- (NSArray<id<iTermGenericNamedMarkReading>> *)toolbeltNamedMarks;
+- (ProfileType)toolbeltProfileType;
 
 @end
 
-@protocol ToolWrapperDelegate
+@protocol ToolWrapperDelegate <NSObject>
 
 @property(nonatomic, assign) id<iTermToolbeltViewDelegate> delegate;
+@property(nonatomic, readonly) BOOL haveOnlyOneTool;
+@property(nonatomic, readonly) ToolCommandHistoryView *commandHistoryView;
+@property(nonatomic, readonly) ToolNamedMarks *namedMarksView;
+@property(nonatomic, readonly) iTermToolSnippets *snippetsView;
+@property(nonatomic, readonly) iTermToolCodecierge *codeciergeView;
 
-- (BOOL)haveOnlyOneTool;
 - (void)hideToolbelt;
 - (void)toggleShowToolWithName:(NSString *)theName;
-- (ToolCommandHistoryView *)commandHistoryView;
 
 @end
 
-@protocol ToolbeltTool
+@protocol ToolbeltTool <NSObject>
+@property(class, nonatomic, readonly) ProfileType supportedProfileTypes;
 - (CGFloat)minimumHeight;
 
 @optional
++ (BOOL)isDynamic;
+- (NSDictionary *)restorableState;
+- (void)restoreFromState:(NSDictionary *)state;
+- (instancetype)initWithFrame:(NSRect)frame URL:(NSURL *)url identifier:(NSString *)identifier;
 - (void)relayout;
 - (void)shutdown;
+- (void)windowBackgroundColorDidChange;
 @end
 
 @interface NSView (ToolWrapper)
@@ -56,13 +91,17 @@
 
 @interface iTermToolWrapper : NSView
 
-@property (nonatomic, copy) NSString *name;
-@property (nonatomic, readonly) __weak NSView *container;
-@property (nonatomic, assign) id<ToolWrapperDelegate> delegate;
+@property(nonatomic) BOOL collapsed;
+@property(nonatomic, copy) NSString *name;
+@property(nonatomic, readonly) NSView *container;
+@property(nonatomic, weak) id<ToolWrapperDelegate> delegate;
+@property(nonatomic, readonly) id<ToolbeltTool> tool;
+@property(nonatomic, readonly) CGFloat minimumHeight;
+@property(nonatomic, readonly) CGFloat minimumHeightWhenExpanded;
 
 - (void)relayout;
-- (NSObject<ToolbeltTool> *)tool;
 - (void)removeToolSubviews;
-- (CGFloat)minimumHeight;
+- (void)temporarilyRemoveSubviews;
+- (void)restoreSubviews;
 
 @end

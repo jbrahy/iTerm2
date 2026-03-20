@@ -8,7 +8,10 @@
 
 #import "iTermTipCardActionButton.h"
 
+#import "NSAppearance+iTerm.h"
 #import "NSBezierPath+iTerm.h"
+#import "NSColor+iTerm.h"
+#import "NSView+iTerm.h"
 #import "SolidColorView.h"
 #import <QuartzCore/QuartzCore.h>
 
@@ -47,6 +50,11 @@ static const CGFloat kStandardButtonHeight = 34;
 
 @end
 
+@interface iTermTipCardActionButton()
+@property(nonatomic, copy) NSString *titleValue;
+@property(nonatomic, copy) NSString *shortcutValue;
+@end
+
 @implementation iTermTipCardActionButton {
     CGFloat _desiredHeight;
     BOOL _isHighlighted;
@@ -57,25 +65,32 @@ static const CGFloat kStandardButtonHeight = 34;
 }
 
 + (NSColor *)blueColor {
-    return [NSColor colorWithCalibratedRed:0.25 green:0.25 blue:0.75 alpha:1];
+    return [NSColor it_dynamicColorForLightMode:[NSColor colorWithCalibratedRed:0.25 green:0.25 blue:0.75 alpha:1]
+                                       darkMode:[NSColor colorWithCalibratedRed:0.5 green:0.5 blue:1 alpha:1]];
 }
 
-- (id)initWithFrame:(NSRect)frameRect {
++ (NSColor *)highlightColor {
+    return [NSColor it_dynamicColorForLightMode:[NSColor colorWithCalibratedWhite:0.90 alpha:1]
+                                       darkMode:[NSColor colorWithCalibratedWhite:0.15 alpha:1]];
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
         _desiredHeight = kStandardButtonHeight;
         self.wantsLayer = YES;
         [self makeBackingLayer];
-        self.layer.backgroundColor = [[NSColor whiteColor] CGColor];
+        self.layer.masksToBounds = YES;
+        self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
         iTermTipCardActionButtonTopDividerView *divider =
             [[[iTermTipCardActionButtonTopDividerView alloc] initWithFrame:NSMakeRect(0, 0, frameRect.size.width, 1)] autorelease];
         divider.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-        divider.color = [NSColor colorWithCalibratedWhite:0.85 alpha:1];
+        divider.color = [NSColor it_automaticDynamicColorForLightModeWhite:0.85 alpha:1];
         [self addSubview:divider];
 
         _leftDivider = [[[iTermTipCardActionButtonLeftDividerView alloc] initWithFrame:NSMakeRect(0, 0, 1, frameRect.size.height)] autorelease];
         _leftDivider.autoresizingMask = NSViewHeightSizable | NSViewMaxXMargin;
-        _leftDivider.color = [NSColor colorWithCalibratedWhite:0.85 alpha:1];
+        _leftDivider.color = [NSColor it_automaticDynamicColorForLightModeWhite:0.85 alpha:1];
         _leftDivider.hidden = YES;
         [self addSubview:_leftDivider];
 
@@ -83,7 +98,7 @@ static const CGFloat kStandardButtonHeight = 34;
         NSBezierPath *path = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(0, 0, 1, 1)];
         _highlightLayer.path = path.iterm_CGPath;
         _highlightLayer.anchorPoint = CGPointMake(0.5, 0.5);
-        _highlightLayer.fillColor = [[NSColor colorWithCalibratedWhite:0.90 alpha:1] CGColor];
+        _highlightLayer.fillColor = [[iTermTipCardActionButton highlightColor] CGColor];
         [self.layer addSublayer:_highlightLayer];
 
         _textField = [[[NSTextField alloc] initWithFrame:NSMakeRect(42, 5, 200, 17)] autorelease];
@@ -101,7 +116,52 @@ static const CGFloat kStandardButtonHeight = 34;
 - (void)dealloc {
     [_block release];
     [_icon release];
+    [_titleValue release];
+    [_shortcutValue release];
     [super dealloc];
+}
+
+- (BOOL)isAccessibilityElement {
+    return YES;
+}
+
+- (NSAccessibilityRole)accessibilityRole {
+    return NSAccessibilityButtonRole;
+}
+
+- (BOOL)accessibilityPerformPress {
+    [self.target performSelector:self.action withObject:self];
+    return YES;
+}
+
+- (id)accessibilityValue {
+    return _titleValue;
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
+}
+
+- (void)updateLayer {
+    [super updateLayer];
+    if (_important) {
+        self.layer.backgroundColor = [[NSColor redColor] CGColor];
+    } else {
+        self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
+    }
+    _highlightLayer.fillColor = [[iTermTipCardActionButton highlightColor] CGColor];
+}
+
+- (void)setImportant:(BOOL)important {
+    _important = important;
+    if (important) {
+        _textField.textColor = [NSColor controlBackgroundColor];
+        self.layer.backgroundColor = [[NSColor redColor] CGColor];
+    } else {
+        _textField.textColor = [[self class] blueColor];
+        self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
+    }
 }
 
 - (void)setIndexInRow:(int)indexInRow {
@@ -110,12 +170,51 @@ static const CGFloat kStandardButtonHeight = 34;
 }
 
 - (void)setTitle:(NSString *)title {
-    _textField.stringValue = title;
+    self.titleValue = title;
+    [self updateTitle];
+}
+
+- (void)updateTitle {
+    CGFloat width = NSWidth(self.bounds) - NSMinX(_textField.frame);
+    NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    paragraphStyle.alignment = NSTextAlignmentLeft;
+
+    // For inscrutable reasons, putting the tab stop all the way at the right edge of the field
+    // doesn't work--the tab seems to be ignored.
+    NSTextTab *tab = [[[NSTextTab alloc] initWithTextAlignment:NSTextAlignmentRight
+                                                      location:width - 8
+                                                       options:@{ }] autorelease];
+    paragraphStyle.tabStops = @[ tab ];
+    NSString *string = [NSString stringWithFormat:@"%@\t%@",
+                                                  self.titleValue ?: @"",
+                                                  self.shortcutValue ?: @""];
+    NSDictionary *attributes = @{ NSParagraphStyleAttributeName: paragraphStyle };
+    NSAttributedString *attributedString =
+        [[[NSAttributedString alloc] initWithString:string attributes:attributes] autorelease];
+    _textField.attributedStringValue = attributedString;
     [_textField sizeToFit];
+    NSRect rect = _textField.frame;
+    rect.size.width = width;
+    rect.origin.y = [self retinaRound:(NSHeight(_textField.superview.frame) - NSHeight(rect)) / 2.0];
+    _textField.frame = rect;
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    [self updateTitle];
+}
+
+- (void)setShortcut:(NSString *)shortcut {
+    self.shortcutValue = shortcut;
+    [self updateTitle];
 }
 
 - (NSString *)title {
-    return _textField.stringValue;
+    return self.titleValue;
+}
+
+- (NSString *)shortcut {
+    return self.shortcutValue;
 }
 
 // This assumes the icon is 22x22
@@ -211,6 +310,11 @@ static const CGFloat kStandardButtonHeight = 34;
 }
 
 - (void)mouseUp:(NSEvent *)theEvent {
+    // Prevent self from being deallocated during this method. CATransaction commit
+    // below can trigger completion handlers that may release our owner, which would
+    // release us while we're still executing.
+    [[self retain] autorelease];
+
     _isHighlighted = NO;
 
     // Scale up highlight while fading it out.

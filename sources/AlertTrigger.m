@@ -7,19 +7,28 @@
 
 #import "AlertTrigger.h"
 #import "PTYSession.h"
+#import "iTerm2SharedARC-Swift.h"
 #import "PTYTab.h"
 #import "PseudoTerminal.h"
+#import "iTermAdvancedSettingsModel.h"
+#import "iTermRateLimitedUpdate.h"
 
-@implementation AlertTrigger
+@implementation AlertTrigger {
+    BOOL disabled_;
+    iTermRateLimitedUpdate *_rateLimit;
+}
 
 + (NSString *)title
 {
     return @"Show Alert…";
 }
 
-- (NSString *)paramPlaceholder
-{
+- (NSString *)triggerOptionalParameterPlaceholderWithInterpolation:(BOOL)interpolation {
     return @"Enter text to show in alert";
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"Show alert “%@”", self.param];
 }
 
 - (BOOL)takesParameter
@@ -27,44 +36,49 @@
     return YES;
 }
 
-- (BOOL)performActionWithCapturedStrings:(NSString *const *)capturedStrings
+- (NSSet<NSNumber *> *)allowedMatchTypes {
+    NSMutableSet *set = [NSMutableSet setWithObject:@(iTermTriggerMatchTypeRegex)];
+    [set unionSet:[iTermEventTriggerMatchTypeHelper allEventTypesSet]];
+    return set;
+}
+
+- (BOOL)performActionWithCapturedStrings:(NSArray<NSString *> *)stringArray
                           capturedRanges:(const NSRange *)capturedRanges
-                            captureCount:(NSInteger)captureCount
-                               inSession:(PTYSession *)aSession
+                               inSession:(id<iTermTriggerSession>)aSession
                                 onString:(iTermStringLine *)stringLine
                     atAbsoluteLineNumber:(long long)lineNumber
+                        useInterpolation:(BOOL)useInterpolation
                                     stop:(BOOL *)stop {
     if (disabled_) {
         return YES;
     }
-    NSString *message = [self paramWithBackreferencesReplacedWithValues:capturedStrings
-                                                                  count:captureCount];
-
-    NSAlert *alert = [NSAlert alertWithMessageText:message
-                                     defaultButton:@"OK"
-                                   alternateButton:@"Show Session"
-                                       otherButton:@"Disable This Alert"
-                         informativeTextWithFormat:@""];
-    switch ([alert runModal]) {
-        case NSAlertDefaultReturn:
-            break;
-            
-        case NSAlertAlternateReturn: {
-            NSWindowController<iTermWindowController> * term = [[aSession tab] realParentWindow];
-            [[term window] makeKeyAndOrderFront:nil];
-            [[term tabView] selectTabViewItemWithIdentifier:[aSession tab]];
-            [[aSession tab] setActiveSession:aSession];
-            break;
-            
-        case NSAlertOtherReturn:
-            disabled_ = YES;
-            break;
-        }
-            
-        default:
-            break;
-    }
+    // Need to stop the world to get scope, provided it is needed. Alerts are so slow & rare that this is ok.
+    id<iTermTriggerScopeProvider> scopeProvider = [aSession triggerSessionVariableScopeProvider:self];
+    id<iTermTriggerCallbackScheduler> scheduler = [scopeProvider triggerCallbackScheduler];
+    [[self paramWithBackreferencesReplacedWithValues:stringArray
+                                             absLine:lineNumber
+                                               scope:scopeProvider
+                                    useInterpolation:useInterpolation] then:^(NSString * _Nonnull message) {
+        [scheduler scheduleTriggerCallback:^{
+            [self showAlertWithMessage:message inSession:aSession];
+        }];
+    }];
     return YES;
+}
+
+- (iTermRateLimitedUpdate *)rateLimit {
+    if (!_rateLimit) {
+        _rateLimit = [[iTermRateLimitedUpdate alloc] initWithName:@"AlertTrigger"
+                                                  minimumInterval:[iTermAdvancedSettingsModel alertTriggerRateLimit]];
+        _rateLimit.suppressionMode = YES;
+    }
+    return _rateLimit;
+}
+
+- (void)showAlertWithMessage:(NSString *)message inSession:(id<iTermTriggerSession>)aSession {
+    [aSession triggerSession:self showAlertWithMessage:message rateLimit:[self rateLimit] disable:^{
+        self->disabled_ = YES;
+    }];
 }
 
 @end

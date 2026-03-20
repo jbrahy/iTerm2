@@ -7,33 +7,34 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import "iTermWeakReference.h"
 
-@interface Coprocess : NSObject {
-    pid_t pid_;  // -1 after termination
-    int outputFd_;
-    int inputFd_;
-    NSMutableData *outputBuffer_;
-    NSMutableData *inputBuffer_;
-    BOOL eof_;
-    BOOL mute_;
-}
+@class Coprocess;
 
-@property (nonatomic, assign) pid_t pid;
-@property (nonatomic, assign) int outputFd;  // for writing
-@property (nonatomic, assign) int inputFd;  // for reading
-@property (nonatomic, readonly) NSMutableData *outputBuffer;
-@property (nonatomic, readonly) NSMutableData *inputBuffer;
-@property (nonatomic, assign) BOOL eof;
-@property (nonatomic, assign) BOOL mute;
+@protocol iTermCoprocessDelegate<NSObject>
+- (void)coprocess:(Coprocess *)coprocess didTerminateWithErrorOutput:(NSString *)errors;
+@end
 
-+ (Coprocess *)launchedCoprocessWithCommand:(NSString *)command;
+@interface Coprocess : NSObject
 
-// This has the side-effect of making the file descriptors non-blocking so
-// it should only be called after exec.
-+ (Coprocess *)coprocessWithPid:(pid_t)pid
-                        outputFd:(int)outputFd
-						 inputFd:(int)inputFd;
+@property(nonatomic, assign) pid_t pid;  // -1 after termination
+@property(nonatomic, assign) int outputFd;  // for writing
+@property(nonatomic, assign) int inputFd;  // for reading
+@property(nonatomic, readonly) NSMutableData *outputBuffer;
+@property(nonatomic, readonly) NSMutableData *inputBuffer;
+@property(nonatomic, assign) BOOL eof;
+@property(nonatomic, assign) BOOL mute;
+@property(nonatomic, readonly) int readFileDescriptor;  // for reading
+@property(nonatomic, readonly) int writeFileDescriptor;  // for writing
+@property(nonatomic, retain) id<iTermCoprocessDelegate, iTermWeakReference> delegate;
+@property(nonatomic, readonly) NSString *command;
+
++ (Coprocess *)launchedCoprocessWithCommand:(NSString *)command
+                                environment:(NSDictionary<NSString *, NSString *> *)environment;
+
 + (NSArray *)mostRecentlyUsedCommands;
++ (void)setSilentlyIgnoreErrors:(BOOL)shouldIgnore fromCommand:(NSString *)command;
++ (BOOL)shouldIgnoreErrorsFromCommand:(NSString *)command;
 
 // Write from outputBuffer
 - (int)write;
@@ -44,7 +45,5 @@
 - (BOOL)wantToWrite;
 - (void)mainProcessDidTerminate;
 - (void)terminate;
-- (int)readFileDescriptor;  // for reading
-- (int)writeFileDescriptor;  // for writing
 
 @end

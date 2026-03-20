@@ -7,9 +7,22 @@
 //
 
 #import <Cocoa/Cocoa.h>
+
+#import "ITAddressBookMgr.h"
+#import "iTermTuple.h"
 #import "VT100GridTypes.h"
 
-@interface NSDictionary (iTerm)
+@class iTermTuple;
+@class NSAppearance;
+
+@interface NSDictionary<__covariant KeyType, __covariant ObjectType> (iTerm)
+
+@property(nonatomic, readonly) BOOL profileIsBrowser;
+@property(nonatomic, readonly) BOOL profileIsTerminal;
+
++ (instancetype)it_dictionaryWithContentsOfData:(NSData *)data;
+
++ (CGFloat)defaultAlphaForColorPresetKey:(NSString *)key;
 
 + (NSDictionary *)dictionaryWithGridCoord:(VT100GridCoord)coord;
 - (VT100GridCoord)gridCoord;
@@ -26,6 +39,10 @@
 + (NSDictionary *)dictionaryWithGridWindowedRange:(VT100GridWindowedRange)range;
 - (VT100GridWindowedRange)gridWindowedRange;
 
++ (NSDictionary *)dictionaryWithGridAbsWindowedRange:(VT100GridAbsWindowedRange)range;
+- (VT100GridAbsWindowedRange)gridAbsWindowedRange;
+- (BOOL)hasGridAbsWindowedRange;
+
 + (NSDictionary *)dictionaryWithGridRange:(VT100GridRange)range;
 - (VT100GridRange)gridRange;
 
@@ -34,10 +51,63 @@
 
 - (BOOL)boolValueDefaultingToYesForKey:(id)key;
 - (NSColor *)colorValue;
+- (BOOL)isColorValue;
 
-// If the dict doesn't have an alpha component, use |alpha|.
-- (NSColor *)colorValueWithDefaultAlpha:(CGFloat)alpha;
+// Uses the key to choose the default alpha value.
+- (NSColor *)colorValueForKey:(NSString *)key;
+
 
 - (NSDictionary *)dictionaryByRemovingNullValues;
+- (NSDictionary *)dictionaryBySettingObject:(ObjectType)object forKey:(KeyType)key;
+- (NSDictionary *)dictionaryByRemovingObjectForKey:(KeyType)key;
+- (NSDictionary<KeyType, ObjectType> *)dictionaryKeepingOnlyKeys:(NSArray<KeyType> *)keys;
+- (NSDictionary<KeyType, ObjectType> *)filteredWithBlock:(BOOL (^NS_NOESCAPE)(KeyType key, ObjectType value))block;
+
+- (NSData *)propertyListData;
+- (NSString *)sizeInfo;
+
+// Returns a dictionary with changed values. If the block returns nil the
+// entry is omitted.
+- (NSDictionary *)mapValuesWithBlock:(id (^)(KeyType key, ObjectType object))block;
+- (NSDictionary *)mapKeysWithBlock:(KeyType (^)(KeyType key, ObjectType object))block;
+// tuple is iTermTuple<KeyType, ObjectType>. Compiler won't let me write this.
+- (NSDictionary *)mapWithBlock:(iTermTuple * (^)(KeyType key, ObjectType object))block;
+- (NSDictionary<id, NSDictionary<KeyType, ObjectType> *> *)classifyWithBlock:(id (^NS_NOESCAPE)(KeyType key, ObjectType object))block;
+
+- (NSData *)it_xmlPropertyList;
+- (BOOL)it_writeToXMLPropertyListAt:(NSString *)path;
+- (id)it_jsonSafeValue;
+
+- (NSDictionary *)it_attributesDictionaryWithAppearance:(NSAppearance *)appearance;
 
 @end
+
+// A handy way of describing the essential parts of a hotkey, as far as being a uniquely registered
+// keystroke goes. Does not include any nonessential information could is not related to the
+// bare-metal mechanics of a keypress. The modifier flags should be masked before the creation of
+// the dictionary.
+typedef NSDictionary iTermHotKeyDescriptor;
+
+@interface NSDictionary(HotKey)
++ (iTermHotKeyDescriptor *)descriptorWithKeyCode:(NSUInteger)keyCode
+                                       modifiers:(NSEventModifierFlags)modifiers;
++ (iTermHotKeyDescriptor *)descriptorWithModifierActivation:(iTermHotKeyModifierActivation)activation;
+
+- (NSUInteger)hotKeyKeyCode;
+- (NSEventModifierFlags)hotKeyModifiers;
+- (iTermHotKeyModifierActivation)hotKeyModifierActivation;
+
+- (BOOL)isEqualToDictionary:(NSDictionary *)other ignoringKeys:(NSSet *)keysToIgnore;
+- (NSDictionary *)dictionaryByMergingDictionary:(NSDictionary *)other;
+
+// Compares pointers only
+- (BOOL)isExactlyEqualToDictionary:(NSDictionary *)other;
+
+@end
+
+@interface NSMutableDictionary<KeyType, ObjectType> (iTerm)
+- (NSInteger)removeObjectsPassingTest:(BOOL (^)(KeyType key, ObjectType obj))block;
+- (void)it_mergeFrom:(NSDictionary<KeyType, ObjectType> *)other;
+- (void)it_addObject:(id)object toMutableArrayForKey:(KeyType)key;
+@end
+

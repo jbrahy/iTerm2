@@ -32,6 +32,7 @@ typedef NS_ENUM(NSInteger, iTermTipCardActionButtonAnimationState) {
 
 // Label
 @property(nonatomic, copy) NSString *title;
+@property(nonatomic, copy) NSString *shortcut;
 
 // 22x22pt icon
 @property(nonatomic, retain) NSImage *icon;
@@ -42,7 +43,12 @@ typedef NS_ENUM(NSInteger, iTermTipCardActionButtonAnimationState) {
 // If many buttons share one row, this gives the number of buttons in the row.
 @property(nonatomic, assign) int numberOfButtonsInRow;
 
+// Important buttons get really loud colors.
+@property(nonatomic, assign) BOOL important;
+
 // Rotate icon 90 degrees? Animates on change.
 - (void)setIconFlipped:(BOOL)isFlipped;
+
++ (NSColor *)blueColor;
 
 @end

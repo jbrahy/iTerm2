@@ -17,7 +17,7 @@
     float height = frame.size.height - 1;
     float width = frame.size.width - 1;
     float x = 0.5;
-    float y = 0;
+    float y = MIN(0, height - 2*radius);
     float nx, ny;
     [path moveToPoint:NSMakePoint(x, y)];
     nx = x+radius;
@@ -26,7 +26,7 @@
          controlPoint1:NSMakePoint((nx+x)/2, y)
          controlPoint2:NSMakePoint(nx, (ny+y)/2)];
     y = ny;
-    ny = y + height - 2*radius;
+    ny = y + MAX(0, height - 2*radius);
     [path lineToPoint:NSMakePoint(nx, ny)];
     x = nx; y = ny;
     nx = x + radius;
@@ -44,7 +44,7 @@
          controlPoint1:NSMakePoint((nx+x)/2, y)
          controlPoint2:NSMakePoint(nx, (ny+y)/2)];
     y = ny;
-    ny = y - height + 2*radius;
+    ny = y - MAX(0, height - 2*radius);
     [path lineToPoint:NSMakePoint(nx, ny)];
     x = nx; y = ny;
     nx = x + radius;
@@ -57,6 +57,14 @@
 }
 
 - (CGPathRef)iterm_CGPath {
+    return [self iterm_cgPathOpen:NO];
+}
+
+- (CGPathRef)iterm_openCGPath {
+    return [self iterm_cgPathOpen:YES];
+}
+
+- (CGPathRef)iterm_cgPathOpen:(BOOL)open {
     if (self.elementCount == 0) {
         return NULL;
     }
@@ -68,16 +76,16 @@
         NSPoint associatedPoints[3];
         NSBezierPathElement element = [self elementAtIndex:i associatedPoints:associatedPoints];
         switch (element) {
-            case NSMoveToBezierPathElement:
+            case NSBezierPathElementMoveTo:
                 CGPathMoveToPoint(path, NULL, associatedPoints[0].x, associatedPoints[0].y);
                 break;
 
-            case NSLineToBezierPathElement:
+            case NSBezierPathElementLineTo:
                 closed = NO;
                 CGPathAddLineToPoint(path, NULL, associatedPoints[0].x, associatedPoints[0].y);
                 break;
 
-            case NSCurveToBezierPathElement:
+            case NSBezierPathElementCurveTo:
                 closed = NO;
                 CGPathAddCurveToPoint(path, NULL,
                                       associatedPoints[0].x, associatedPoints[0].y,
@@ -85,14 +93,20 @@
                                       associatedPoints[2].x, associatedPoints[2].y);
                 break;
 
-            case NSClosePathBezierPathElement:
+            case NSBezierPathElementClosePath:
                 closed = YES;
-                CGPathCloseSubpath(path);
+                if (!open) {
+                    CGPathCloseSubpath(path);
+                }
+                break;
+            case NSBezierPathElementQuadraticCurveTo:
+                closed = NO;
+                CGPathAddQuadCurveToPoint(path, NULL, associatedPoints[0].x, associatedPoints[0].y, associatedPoints[1].x, associatedPoints[1].y);
                 break;
         }
     }
 
-    if (!closed) {
+    if (!closed && !open) {
         CGPathCloseSubpath(path);
     }
 

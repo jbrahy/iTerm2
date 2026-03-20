@@ -36,8 +36,11 @@
 }
 
 @property (nonatomic, assign) NSSize size;
-@property (nonatomic, assign) double baseline;
 
-+ (id)fontSizeEstimatorForFont:(NSFont *)aFont;
+// Returns a text container and layout manager that are ready to measure a capital W.
++ (NSTextContainer *)textContainer;
++ (NSLayoutManager *)layoutManagerForFont:(NSFont *)aFont textContainer:(NSTextContainer *)textContainer;
+
++ (instancetype)fontSizeEstimatorForFont:(NSFont *)aFont;
 
 @end

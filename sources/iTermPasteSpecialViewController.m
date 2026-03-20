@@ -7,6 +7,8 @@
 //
 
 #import "iTermPasteSpecialViewController.h"
+#import "iTerm2SharedARC-Swift.h"
+#import "NSTextField+iTerm.h"
 #import "PasteEvent.h"
 
 typedef struct {
@@ -15,7 +17,7 @@ typedef struct {
     double visualCenter;
 } iTermFloatingRange;
 
-#define DASHES @"\u2010-\u2015\u207b\u208b\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d"
+#define DASHES @"\u2010-\u2015\u207b\u208b\u2212\u2e3a\u2e3b\ufe58\ufe63\uff0d\u00ad"
 #define DOUBLE_QUOTES @"\u201c-\u201f\u301d-\u301f\uff02"
 #define SINGLE_QUOTES @"\u2018-\u201b\uff07"
 
@@ -45,6 +47,12 @@ static NSString *const kShouldUseBracketedPasteMode = @"BracketAllowed";
 static NSString *const kShouldBase64Encode = @"Base64";
 static NSString *const kShouldConvertUnicodePunctuation = @"ConvertUnicodePunctuation";
 static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
+static NSString *const kShouldUseRegexSubstitution = @"UseRegexSubstitution";
+static NSString *const kRegularExpression = @"Regex";
+static NSString *const kSubstitution = @"Substitution";
+
+@interface iTermPasteSpecialViewController()<NSControlTextEditingDelegate>
+@end
 
 @implementation iTermPasteSpecialViewController {
     IBOutlet NSTextField *_spacesPerTab;
@@ -55,6 +63,9 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     IBOutlet NSButton *_convertNewlines;
     IBOutlet NSButton *_removeNewlines;
     IBOutlet NSButton *_base64Encode;
+    IBOutlet NSButton *_useRegexSubstitution;
+    IBOutlet NSTextField *_regex;
+    IBOutlet NSTextField *_substitution;
     IBOutlet NSButton *_waitForPrompts;
     IBOutlet NSButton *_convertUnicodePunctuation;
     IBOutlet NSSlider *_chunkSizeSlider;
@@ -62,10 +73,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     IBOutlet NSTextField *_chunkSizeLabel;
     IBOutlet NSTextField *_delayBetweenChunksLabel;
     IBOutlet NSStepper *_stepper;
+    IBOutlet NSTextField *_icuRegexHelpLabel;  // Warning: this gets removed from superview in awakeFromNib.
 }
 
 - (instancetype)init {
-    self = [super initWithNibName:@"iTermPasteSpecialViewController" bundle:nil];
+    self = [super initWithNibName:@"iTermPasteSpecialViewController" bundle:[NSBundle bundleForClass:self.class]];
     return self;
 }
 
@@ -78,6 +90,24 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 
     self.delayBetweenChunks = kDelayRange.visualCenter;
     self.chunkSize = kChunkSizeRange.visualCenter;
+
+    [_icuRegexHelpLabel replaceWithHyperlinkTo:[NSURL URLWithString:@"https://iterm2.com/regex"]];
+    _icuRegexHelpLabel = nil;
+}
+
+- (void)setProfileType:(ProfileType)profileType {
+    _profileType = profileType;
+    NSSize shrinkage;
+    (void)[self.view setVisibilityForTerminalEnclosures:!!(profileType & ProfileTypeTerminal)
+                                      browserEnclosures:!!(profileType & ProfileTypeBrowser)
+                                   hiddenModeEnclosures:[iTermAdvancedSettingsModel browserProfiles]
+                               sharedProfilesEnclosures:false
+                                           stateStorage:[NSMutableDictionary dictionary]
+                                              shrinkage:&shrinkage];
+    NSRect frame = self.view.frame;
+    frame.size.height -= shrinkage.height;
+    frame.size.width -= shrinkage.width;
+    self.view.frame = frame;
 }
 
 // TODO: When 10.7 support is dropped use NSByteCountFormatter
@@ -147,11 +177,22 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     [_delegate pasteSpecialViewSpeedDidChange];
 }
 
+- (BOOL)controlIsTransform:(NSControl *)control {
+    return (control != _bracketedPasteMode &&
+            control != _waitForPrompts &&
+            control != _chunkSizeSlider &&
+            control != _delayBetweenChunksSlider);
+}
+
 - (IBAction)settingChanged:(id)sender {
     _spacesPerTab.enabled = (_tabTransform.enabled &&
                              _tabTransform.selectedTag == kTabTransformConvertToSpaces);
-    _convertNewlines.enabled = (_removeNewlines.state != NSOnState);
-    [_delegate pasteSpecialTransformDidChange];
+    _convertNewlines.enabled = (_removeNewlines.state != NSControlStateValueOn);
+    _regex.enabled = self.shouldUseRegexSubstitution;
+    _substitution.enabled = self.shouldUseRegexSubstitution;
+    if ([self controlIsTransform:sender]) {
+        [_delegate pasteSpecialTransformDidChange];
+    }
 }
 
 - (IBAction)stepperDidChange:(id)sender {
@@ -162,9 +203,13 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 
 #pragma mark - NSTextField Delegate
 
-- (void)controlTextDidChange:(NSNotification *)obj {
-    _spacesPerTab.integerValue = MAX(0, MIN(100, _spacesPerTab.integerValue));
-    _stepper.integerValue = _spacesPerTab.integerValue;
+- (void)controlTextDidChange:(NSNotification *)notification {
+    if ([notification object] == _regex || [notification object] == _substitution) {
+        [_delegate pasteSpecialTransformDidChange];
+    } else {
+        _spacesPerTab.integerValue = MAX(0, MIN(100, _spacesPerTab.integerValue));
+        _stepper.integerValue = _spacesPerTab.integerValue;
+    }
 }
 
 #pragma mark - Properties
@@ -221,27 +266,27 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (void)setShouldConvertUnicodePunctuation:(BOOL)shouldConvertUnicodePunctuation {
-    _convertUnicodePunctuation.state = shouldConvertUnicodePunctuation ? NSOnState : NSOffState;
+    _convertUnicodePunctuation.state = shouldConvertUnicodePunctuation ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldConvertUnicodePunctuation {
-    return _convertUnicodePunctuation.state == NSOnState;
+    return _convertUnicodePunctuation.state == NSControlStateValueOn;
 }
 
 - (void)setShouldConvertNewlines:(BOOL)shouldConvertNewlines {
-    _convertNewlines.state = shouldConvertNewlines ? NSOnState : NSOffState;
+    _convertNewlines.state = shouldConvertNewlines ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldConvertNewlines {
-    return _convertNewlines.state == NSOnState;
+    return _convertNewlines.state == NSControlStateValueOn;
 }
 
 - (void)setShouldRemoveNewlines:(BOOL)shouldRemoveNewlines {
-    _removeNewlines.state = shouldRemoveNewlines ? NSOnState : NSOffState;
+    _removeNewlines.state = shouldRemoveNewlines ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldRemoveNewlines {
-    return _removeNewlines.state == NSOnState;
+    return _removeNewlines.state == NSControlStateValueOn;
 }
 
 - (void)setEnableEscapeShellCharsWithBackslash:(BOOL)enableEscapeShellCharsWithBackslash {
@@ -253,11 +298,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (void)setShouldEscapeShellCharsWithBackslash:(BOOL)shouldEscapeShellCharsWithBackslash {
-    _escapeShellCharsWithBackslash.state = shouldEscapeShellCharsWithBackslash ? NSOnState : NSOffState;
+    _escapeShellCharsWithBackslash.state = shouldEscapeShellCharsWithBackslash ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldEscapeShellCharsWithBackslash {
-    return _escapeShellCharsWithBackslash.state == NSOnState;
+    return _escapeShellCharsWithBackslash.state == NSControlStateValueOn;
 }
 
 - (void)setDelayBetweenChunks:(NSTimeInterval)delayBetweenChunks {
@@ -281,11 +326,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (void)setShouldRemoveControlCodes:(BOOL)shouldRemoveControlCodes {
-    _removeControlCodes.state = shouldRemoveControlCodes ? NSOnState : NSOffState;
+    _removeControlCodes.state = shouldRemoveControlCodes ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldRemoveControlCodes {
-    return _removeControlCodes.state == NSOnState;
+    return _removeControlCodes.state == NSControlStateValueOn;
 }
 
 - (void)setEnableBracketedPaste:(BOOL)enableBracketedPaste {
@@ -297,11 +342,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (void)setShouldUseBracketedPasteMode:(BOOL)shouldUseBracketedPasteMode {
-    _bracketedPasteMode.state = shouldUseBracketedPasteMode ? NSOnState : NSOffState;
+    _bracketedPasteMode.state = shouldUseBracketedPasteMode ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldUseBracketedPasteMode {
-    return _bracketedPasteMode.state == NSOnState;
+    return _bracketedPasteMode.state == NSControlStateValueOn;
 }
 
 - (void)setEnableBase64:(BOOL)enableBase64 {
@@ -313,11 +358,29 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (void)setShouldBase64Encode:(BOOL)shouldBase64Encode {
-    _base64Encode.state = shouldBase64Encode ? NSOnState : NSOffState;
+    _base64Encode.state = shouldBase64Encode ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
 - (BOOL)shouldBase64Encode {
-    return _base64Encode.state == NSOnState;
+    return _base64Encode.state == NSControlStateValueOn;
+}
+
+- (void)setEnableUseRegexSubstitution:(BOOL)enableRegexSubstitution {
+    _useRegexSubstitution.enabled = enableRegexSubstitution;
+}
+
+- (BOOL)isUseRegexSubstitutionEnabled {
+    return _useRegexSubstitution.enabled;
+}
+
+- (void)setShouldUseRegexSubstitution:(BOOL)shouldUseRegexSubstitution {
+    _useRegexSubstitution.state = shouldUseRegexSubstitution ? NSControlStateValueOn : NSControlStateValueOff;
+    _regex.enabled = shouldUseRegexSubstitution;
+    _substitution.enabled = shouldUseRegexSubstitution;
+}
+
+- (BOOL)shouldUseRegexSubstitution {
+    return _useRegexSubstitution.state == NSControlStateValueOn;
 }
 
 - (void)setEnableWaitForPrompt:(BOOL)enableWaitForPrompt {
@@ -329,11 +392,27 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
 }
 
 - (BOOL)shouldWaitForPrompt {
-    return _waitForPrompts.state == NSOnState;
+    return _waitForPrompts.state == NSControlStateValueOn;
 }
 
 - (void)setShouldWaitForPrompt:(BOOL)shouldWaitForPrompt {
-    _waitForPrompts.state = shouldWaitForPrompt ? NSOnState : NSOffState;
+    _waitForPrompts.state = shouldWaitForPrompt ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)setSubstitutionString:(NSString *)substitutionString {
+    _substitution.stringValue = substitutionString;
+}
+
+- (NSString *)substitutionString {
+    return _substitution.stringValue;
+}
+
+- (void)setRegexString:(NSString *)regexString {
+    _regex.stringValue = regexString;
+}
+
+- (NSString *)regexString {
+    return _regex.stringValue;
 }
 
 - (NSString *)stringEncodedSettings {
@@ -349,6 +428,9 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
            kShouldRemoveControlCodes: @(self.shouldRemoveControlCodes),
            kShouldUseBracketedPasteMode: @(self.shouldUseBracketedPasteMode),
            kShouldBase64Encode: @(self.shouldBase64Encode),
+           kShouldUseRegexSubstitution: @(self.shouldUseRegexSubstitution),
+           kRegularExpression: self.regexString ?: @"",
+           kSubstitution: self.substitutionString ?: @"",
            kShouldWaitForPrompts: @(self.shouldWaitForPrompt)
          };
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict
@@ -409,6 +491,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
         [components addObject:@"ConvertPunctuation"];
     }
 
+    if ([dict[kShouldUseRegexSubstitution] boolValue]) {
+        [components addObject:[NSString stringWithFormat:@"s/%@/%@/g",
+                               dict[kRegularExpression] ?: @"",
+                               dict[kSubstitution] ?: @""]];
+    }
     return [components componentsJoinedByString:@", "];
 }
 
@@ -426,6 +513,11 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     self.shouldRemoveControlCodes = [dict[kShouldRemoveControlCodes] boolValue];
     self.shouldUseBracketedPasteMode = [dict[kShouldUseBracketedPasteMode] boolValue];
     self.shouldBase64Encode = [dict[kShouldBase64Encode] boolValue];
+    self.shouldUseRegexSubstitution = [dict[kShouldUseRegexSubstitution] boolValue];
+    if (self.shouldUseRegexSubstitution) {
+        self.regexString = dict[kRegularExpression] ?: @"";
+        self.substitutionString = dict[kSubstitution] ?: @"";
+    }
     self.shouldWaitForPrompt = [dict[kShouldWaitForPrompts] boolValue];
 }
 
@@ -443,6 +535,7 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     BOOL shouldRemoveControlCodes = [dict[kShouldRemoveControlCodes] boolValue];
     BOOL shouldUseBracketedPasteMode = [dict[kShouldUseBracketedPasteMode] boolValue];
     BOOL shouldBase64Encode = [dict[kShouldBase64Encode] boolValue];
+    BOOL shouldUseRegexSubstitution = [dict[kShouldUseRegexSubstitution] boolValue];
     BOOL shouldWaitForPrompt = [dict[kShouldWaitForPrompts] boolValue];
     BOOL shouldConvertUnicodePunctuation = [dict[kShouldConvertUnicodePunctuation] boolValue];
 
@@ -471,7 +564,9 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     if (shouldConvertUnicodePunctuation) {
         flags |= kPasteFlagsConvertUnicodePunctuation;
     }
-
+    if (shouldUseRegexSubstitution) {
+        flags |= kPasteFlagsUseRegexSubstitution;
+    }
     PasteEvent *pasteEvent = [PasteEvent pasteEventWithString:string
                                                         flags:flags
                                              defaultChunkSize:chunkSize
@@ -479,7 +574,10 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
                                                  defaultDelay:delayBetweenChunks
                                                      delayKey:nil
                                                  tabTransform:selectedTabTransform
-                                                 spacesPerTab:numberOfSpacesPerTab];
+                                                 spacesPerTab:numberOfSpacesPerTab
+                                                        regex:dict[kRegularExpression] ?: @""
+                                                 substitution:dict[kSubstitution] ?: @""
+                           shouldPasteNewlinesOutsideBrackets:NO];
     return pasteEvent;
 }
 
@@ -508,6 +606,9 @@ static NSString *const kShouldWaitForPrompts = @"WaitForPrompts";
     }
     if (self.shouldConvertUnicodePunctuation) {
         flags |= kPasteFlagsConvertUnicodePunctuation;
+    }
+    if (self.shouldUseRegexSubstitution) {
+        flags |= kPasteFlagsUseRegexSubstitution;
     }
     return flags;
 }

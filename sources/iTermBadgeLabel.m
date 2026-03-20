@@ -8,12 +8,15 @@
 
 #import "iTermBadgeLabel.h"
 #import "DebugLogging.h"
+#import "NSImage+iTerm.h"
+#import "NSStringITerm.h"
 
 @interface iTermBadgeLabel()
 @property(nonatomic, retain) NSImage *image;
 @end
 
 @implementation iTermBadgeLabel {
+    NSMutableDictionary<NSString *, NSImage *> *_images;
     BOOL _dirty;
     NSMutableParagraphStyle *_paragraphStyle;
 }
@@ -23,27 +26,19 @@
     if (self) {
         _paragraphStyle = [[NSMutableParagraphStyle alloc] init];
         _paragraphStyle.lineBreakMode = NSLineBreakByWordWrapping;
-        _paragraphStyle.alignment = NSRightTextAlignment;
+        _paragraphStyle.alignment = NSTextAlignmentRight;
+        _minimumPointSize = 4;
+        _maximumPointSize = 100;
+        _images = [NSMutableDictionary dictionary];
     }
     return self;
-}
-
-- (void)dealloc {
-    [_fillColor release];
-    [_backgroundColor release];
-    [_stringValue release];
-    [_image release];
-    [_paragraphStyle release];
-
-    [super dealloc];
 }
 
 - (void)setFillColor:(NSColor *)fillColor {
     if ([fillColor isEqual:_fillColor] || fillColor == _fillColor) {
         return;
     }
-    [_fillColor autorelease];
-    _fillColor = [fillColor retain];
+    _fillColor = fillColor;
     [self setDirty:YES];
 }
 
@@ -51,8 +46,7 @@
     if ([backgroundColor isEqual:_backgroundColor] || backgroundColor == _backgroundColor) {
         return;
     }
-    [_backgroundColor autorelease];
-    _backgroundColor = [backgroundColor retain];
+    _backgroundColor = backgroundColor;
     [self setDirty:YES];
 }
 
@@ -60,7 +54,6 @@
     if ([stringValue isEqual:_stringValue] || stringValue == _stringValue) {
         return;
     }
-    [_stringValue autorelease];
     _stringValue = [stringValue copy];
     [self setDirty:YES];
 }
@@ -74,8 +67,8 @@
 }
 
 - (NSImage *)image {
-    if (_fillColor && _stringValue && !NSEqualSizes(_viewSize, NSZeroSize) && !_image) {
-        _image = [[self freshlyComputedImage] retain];
+    if (!_image) {
+        _image = [self freshlyComputedImage];
     }
     return _image;
 }
@@ -92,7 +85,7 @@
 // Compute the best point size and return a new image of the badge. Returns nil if the badge
 // is empty or zero pixels.r
 - (NSImage *)freshlyComputedImage {
-    DLog(@"Recompute badge self=%p, label=%@, color=%@, view size=%@. Called from:\n%@",
+    DLog(@"Recompute badge self=%p, label=“%@”, color=%@, view size=%@. Called from:\n%@",
          self,
          _stringValue,
          _fillColor,
@@ -110,64 +103,71 @@
 // have 0 pixels.
 - (NSImage *)imageWithPointSize:(CGFloat)pointSize {
     NSDictionary *attributes = [self attributesWithPointSize:pointSize];
-    NSSize sizeWithFont = [self sizeWithAttributes:attributes];
-    if (sizeWithFont.width <= 0 && sizeWithFont.height <= 0) {
+    NSMutableDictionary *temp = [attributes mutableCopy];
+    temp[NSStrokeColorAttributeName] = [_backgroundColor colorWithAlphaComponent:1];
+    BOOL truncated;
+    NSSize sizeWithFont = [self sizeWithAttributes:temp truncated:&truncated];
+    if (sizeWithFont.width <= 0 || sizeWithFont.height <= 0) {
         return nil;
     }
 
-    NSImage *image = [[[NSImage alloc] initWithSize:sizeWithFont] autorelease];
+    NSImage *image = [[NSImage alloc] initWithSize:sizeWithFont];
     [image lockFocus];
-    NSMutableDictionary *temp = [[attributes mutableCopy] autorelease];
-    temp[NSStrokeWidthAttributeName] = @-2;
-    temp[NSStrokeColorAttributeName] =
-        [_backgroundColor colorWithAlphaComponent:_fillColor.alphaComponent];
-    [_stringValue drawWithRect:NSMakeRect(0, 0, sizeWithFont.width, sizeWithFont.height)
-                       options:NSStringDrawingUsesLineFragmentOrigin
-                    attributes:temp];
-    [image unlockFocus];
 
+    [_stringValue it_drawInRect:NSMakeRect(0, 0, sizeWithFont.width, sizeWithFont.height)
+                     attributes:temp
+                          alpha:_fillColor.alphaComponent];
+
+    [image unlockFocus];
     return image;
 }
 
 // Attributed string attributes for a given font point size.
 - (NSDictionary *)attributesWithPointSize:(CGFloat)pointSize {
-    NSFontManager *fontManager = [NSFontManager sharedFontManager];
-    NSFont *font = [fontManager convertFont:[NSFont fontWithName:@"Helvetica" size:pointSize]
-                                toHaveTrait:NSBoldFontMask];
-    NSDictionary *attributes = @{ NSFontAttributeName: font,
+    NSDictionary *attributes = @{ NSFontAttributeName: [self.delegate badgeLabelFontOfSize:pointSize],
                                   NSForegroundColorAttributeName: _fillColor,
-                                  NSParagraphStyleAttributeName: _paragraphStyle };
+                                  NSParagraphStyleAttributeName: _paragraphStyle,
+                                  NSStrokeWidthAttributeName: @-2 };
     return attributes;
 }
 
 // Size of the image resulting from drawing an attributed string with |attributes|.
-- (NSSize)sizeWithAttributes:(NSDictionary *)attributes {
-    NSRect bounds = [_stringValue boundingRectWithSize:self.maxSize
-                                               options:NSStringDrawingUsesLineFragmentOrigin
-                                            attributes:attributes];
+- (NSSize)sizeWithAttributes:(NSDictionary *)attributes truncated:(BOOL *)truncated {
+    NSSize size = self.maxSize;
+    size.height = CGFLOAT_MAX;
+    NSRect bounds = [_stringValue it_boundingRectWithSize:self.maxSize
+                                               attributes:attributes
+                                                truncated:truncated];
     return bounds.size;
 }
 
 // Max size of image in points within the containing view.
 - (NSSize)maxSize {
+    const NSSize fractions = [self.delegate badgeLabelSizeFraction];
+    double maxWidth = MIN(1.0, MAX(0.01, fractions.width));
+    double maxHeight = MIN(1.0, MAX(0.0, fractions.height));
     NSSize maxSize = _viewSize;
-    maxSize.width *= 0.5;
-    maxSize.height *= 0.2;
+    maxSize.width *= maxWidth;
+    maxSize.height *= maxHeight;
     return maxSize;
 }
 
 - (CGFloat)idealPointSize {
+    DLog(@"Computing ideal point size for badge");
     NSSize maxSize = self.maxSize;
 
     // Perform a binary search for the point size that best fits |maxSize|.
-    CGFloat min = 4;
-    CGFloat max = 100;
+    CGFloat min = self.minimumPointSize;
+    CGFloat max = self.maximumPointSize;
     int points = (min + max) / 2;
     int prevPoints = -1;
     NSSize sizeWithFont = NSZeroSize;
     while (points != prevPoints) {
-        sizeWithFont = [self sizeWithAttributes:[self attributesWithPointSize:points]];
-        if (sizeWithFont.width > maxSize.width ||
+        BOOL truncated;
+        sizeWithFont = [self sizeWithAttributes:[self attributesWithPointSize:points] truncated:&truncated];
+        DLog(@"Point size of %@ gives label size of %@", @(points), NSStringFromSize(sizeWithFont));
+        if (truncated ||
+            sizeWithFont.width > maxSize.width ||
             sizeWithFont.height > maxSize.height) {
             max = points;
         } else if (sizeWithFont.width < maxSize.width &&
@@ -177,6 +177,7 @@
         prevPoints = points;
         points = (min + max) / 2;
     }
+    DLog(@"Using point size %@", @(points));
     return points;
 }
 

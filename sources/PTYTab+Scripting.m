@@ -7,12 +7,15 @@
 //
 
 #import "PTYTab+Scripting.h"
+
+#import "iTermScriptingWindow.h"
 #import "PseudoTerminal.h"
 #import "PTYWindow.h"
+
 @implementation PTYTab (Scripting)
 
-- (NSScriptObjectSpecifier *)objectSpecifier {
-  id classDescription = [NSClassDescription classDescriptionForClass:[PTYWindow class]];
+- (NSScriptObjectSpecifier *)scriptingObjectSpecifier {
+  id classDescription = [NSClassDescription classDescriptionForClass:[iTermScriptingWindow class]];
   NSInteger index = [[self realParentWindow] indexOfTab:self];
   return [[[NSIndexSpecifier alloc] initWithContainerClassDescription:classDescription
                                                    containerSpecifier:[self.realParentWindow.window objectSpecifier]
@@ -37,9 +40,27 @@
     return [self sessions];
   } else if ([key isEqualToString:@"indexOfTab"]) {
     return [self indexOfTab];
+  } else if ([key isEqualToString:@"title"]) {
+    return [self title];
   } else {
     return nil;
   }
+}
+
+- (id)valueWithUniqueID:(id)uniqueID inPropertyWithKey:(NSString *)key {
+    if ([key isEqualToString:@"sessions"]) {
+        return [self valueInSessionsWithWithUniqueID:uniqueID];
+    }
+    return nil;
+}
+
+- (id)valueInSessionsWithWithUniqueID:(NSString *)guid {
+    for (PTYSession *session in self.sessions) {
+        if ([session.guid isEqual:guid]) {
+            return session;
+        }
+    }
+    return nil;
 }
 
 - (NSUInteger)countOfSessions {

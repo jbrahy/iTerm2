@@ -12,6 +12,7 @@
 #import "VT100AnsiParser.h"
 #import "VT100DCSParser.h"
 #import "VT100OtherParser.h"
+#import "iTerm2SharedARC-Swift.h"
 
 @interface VT100ControlParser ()
 @property(nonatomic, retain) VT100DCSParser *dcsParser;
@@ -19,7 +20,7 @@
 
 @implementation VT100ControlParser
 
-- (id)init {
+- (instancetype)init {
     self = [super init];
     if (self) {
         _dcsParser = [[VT100DCSParser alloc] init];
@@ -30,6 +31,10 @@
 - (void)dealloc {
     [_dcsParser release];
     [super dealloc];
+}
+
+- (BOOL)shouldUnhook:(NSString *)uniqueID {
+    return [_dcsParser.uniqueID isEqualToString:uniqueID];
 }
 
 - (void)unhookDCS {
@@ -59,15 +64,36 @@
 }
 
 
-- (void)parseControlWithData:(unsigned char *)datap
-                     datalen:(int)datalen
-                       rmlen:(int *)rmlen
-                 incidentals:(CVector *)incidentals
-                       token:(VT100Token *)token
-                    encoding:(NSStringEncoding)encoding
-                  savedState:(NSMutableDictionary *)savedState
-                   dcsHooked:(BOOL *)dcsHooked {
-    if (_dcsParser.isHooked || isDCS(datap, datalen)) {
+- (void)parseControlWithConsumer:(VT100ByteStreamConsumer *)consumer
+                     incidentals:(CVector *)incidentals
+                           token:(VT100Token *)token
+                        encoding:(NSStringEncoding)encoding
+                      savedState:(NSMutableDictionary *)savedState
+                       dcsHooked:(BOOL *)dcsHooked {
+    VT100ByteStreamCursor cursor = VT100ByteStreamConsumerGetCursor(consumer);
+    int rmlen = VT100ByteStreamConsumerGetConsumed(consumer);
+    [self parseControlWithCursor:cursor
+                           rmlen:&rmlen
+                     incidentals:incidentals
+                           token:token
+                        encoding:encoding
+                      savedState:savedState
+                       dcsHooked:dcsHooked];
+    VT100ByteStreamConsumerSetConsumed(consumer, rmlen);
+}
+
+- (void)parseControlWithCursor:(VT100ByteStreamCursor)cursor
+                         rmlen:(int *)rmlen
+                   incidentals:(CVector *)incidentals
+                         token:(VT100Token *)token
+                      encoding:(NSStringEncoding)encoding
+                    savedState:(NSMutableDictionary *)savedState
+                     dcsHooked:(BOOL *)dcsHooked {
+    unsigned char *datap = VT100ByteStreamCursorGetMutablePointer(&cursor);
+    int datalen = VT100ByteStreamCursorGetSize(&cursor);
+    
+    const BOOL support8BitControlCharacters = (encoding == NSASCIIStringEncoding || encoding == NSISOLatin1StringEncoding);
+    if (_dcsParser.isHooked || isDCS(datap, datalen, support8BitControlCharacters)) {
         [self parseDCSWithData:datap
                        datalen:datalen
                          rmlen:rmlen
@@ -75,13 +101,14 @@
                       encoding:encoding
                     savedState:savedState];
         *dcsHooked = self.dcsParser.isHooked;
-    } else if (isCSI(datap, datalen)) {
+    } else if (isCSI(datap, datalen, support8BitControlCharacters)) {
         iTermParserContext context = iTermParserContextMake(datap, datalen);
         [VT100CSIParser decodeFromContext:&context
+             support8BitControlCharacters:support8BitControlCharacters
                               incidentals:incidentals
                                     token:token];
         *rmlen = context.rmlen;
-    } else if (isXTERM(datap, datalen)) {
+    } else if (isXTERM(datap, datalen, support8BitControlCharacters)) {
         iTermParserContext context = iTermParserContextMake(datap, datalen);
         [VT100XtermParser decodeFromContext:&context
                                 incidentals:incidentals
@@ -96,7 +123,7 @@
                                token:token];
     } else {
         NSCParameterAssert(datalen > 0);
-        
+
         switch (*datap) {
             case VT100CC_NULL:
                 token->type = VT100_SKIP;
@@ -119,7 +146,53 @@
                                          encoding:encoding];
                 }
                 break;
-                
+
+            case VT100CC_C1_IND:
+                if (support8BitControlCharacters) {
+                    token->type = VT100CSI_IND;
+                    *rmlen = 1;
+                    break;
+                }
+                // Fall through
+
+            case VT100CC_C1_NEL:
+                if (support8BitControlCharacters) {
+                    token->type = VT100CSI_NEL;
+                    *rmlen = 1;
+                    break;
+                }
+                // Fall through
+
+            case VT100CC_C1_HTS:
+                if (support8BitControlCharacters) {
+                    token->type = VT100CSI_HTS;
+                    *rmlen = 1;
+                    break;
+                }
+                // Fall through
+
+            case VT100CC_C1_RI:
+                if (support8BitControlCharacters) {
+                    token->type = VT100CSI_RI;
+                    *rmlen = 1;
+                    break;
+                }
+                // Fall through
+
+            case VT100CC_C1_SS2:
+            case VT100CC_C1_SS3:
+            case VT100CC_C1_SPA:
+            case VT100CC_C1_EPA:
+            case VT100CC_C1_SOS:
+            case VT100CC_C1_DECID:
+            case VT100CC_C1_PM:
+                if (support8BitControlCharacters) {
+                    token->type = VT100_NOTSUPPORT;
+                    *rmlen = 1;
+                    break;
+                }
+                // Fall through
+
             default:
                 token->type = *datap;
                 *rmlen = 1;
@@ -128,8 +201,24 @@
     }
 }
 
-- (void)startTmuxRecoveryMode {
-    [_dcsParser startTmuxRecoveryMode];
+- (void)startTmuxRecoveryModeWithID:(NSString *)dcsID {
+    [_dcsParser startTmuxRecoveryModeWithID:dcsID];
+}
+
+- (void)cancelTmuxRecoveryMode {
+    [_dcsParser cancelTmuxRecoveryMode];
+}
+
+- (void)startConductorRecoveryModeWithID:(NSString *)dcsID {
+    [_dcsParser startConductorRecoveryModeWithID:dcsID];
+}
+
+- (void)cancelConductorRecoveryMode {
+    [_dcsParser cancelConductorRecoveryMode];
+}
+
+- (BOOL)dcsHookIsSSH {
+    return _dcsParser.isHooked && [_dcsParser.hookDescription isEqualToString:[VT100ConductorParser hookDescription]];
 }
 
 @end

@@ -2,12 +2,17 @@
 
 #import "FutureMethods.h"
 #import "iTermToolWrapper.h"
+#import "PTYSplitView.h"
 
+@protocol PTYSplitViewDelegate;
 @class ToolCapturedOutputView;
 @class ToolCommandHistoryView;
 @class ToolDirectoriesView;
+@class ToolJobs;
+@class ToolNamedMarks;
 @class ToolbeltSplitView;
 
+extern NSString *const kActionsToolName;
 extern NSString *const kCapturedOutputToolName;
 extern NSString *const kCommandHistoryToolName;
 extern NSString *const kRecentDirectoriesToolName;
@@ -15,28 +20,41 @@ extern NSString *const kJobsToolName;
 extern NSString *const kNotesToolName;
 extern NSString *const kPasteHistoryToolName;
 extern NSString *const kProfilesToolName;
+extern NSString *const kDynamicToolsDidChange;
+
+extern NSString *const iTermToolbeltDidRegisterDynamicToolNotification;
 
 // Notification posted when all windows should hide their toolbelts.
 extern NSString *const kToolbeltShouldHide;
 
-@interface iTermToolbeltView : NSView <NSSplitViewDelegate, ToolWrapperDelegate>
+@interface iTermToolbeltView : NSView <PTYSplitViewDelegate, ToolWrapperDelegate>
 
 @property(nonatomic, assign) id<iTermToolbeltViewDelegate> delegate;
 @property(nonatomic, readonly) ToolDirectoriesView *directoriesView;
 @property(nonatomic, readonly) ToolCapturedOutputView *capturedOutputView;
+@property(nonatomic, readonly) ToolJobs *jobsView;
+@property(nonatomic, retain) NSDictionary *proportions;
+
++ (NSDictionary *)savedProportions;
 
 // Returns an array of tool keys.
 + (NSArray *)allTools;
 
-// Returns an array of tool keys for tools to show.
+// Returns an array of tool keys for tools to show ignoring profile type.
 + (NSArray *)configuredTools;
+
+// An array of tool keys that we can actually use.
++ (NSArray<NSString *> *)availableConfiguredToolsForProfileType:(ProfileType)profileType;
 
 + (void)populateMenu:(NSMenu *)menu;
 + (void)toggleShouldShowTool:(NSString *)theName;
-+ (int)numberOfVisibleTools;
-+ (BOOL)shouldShowTool:(NSString *)name;
++ (int)numberOfVisibleToolsForProfileType:(ProfileType)profileType;
++ (BOOL)shouldShowTool:(NSString *)name
+           profileType:(ProfileType)profileType;
++ (NSArray<NSString *> *)builtInToolNames;
++ (void)registerDynamicToolWithIdentifier:(NSString *)identifier name:(NSString *)name URL:(NSString *)url revealIfAlreadyRegistered:(BOOL)revealIfAlreadyRegistered;
 
-- (id)initWithFrame:(NSRect)frame delegate:(id<iTermToolbeltViewDelegate>)delegate;
+- (instancetype)initWithFrame:(NSRect)frame delegate:(id<iTermToolbeltViewDelegate>)delegate;
 
 // Stop timers, etc., releasing any internal references to self.
 - (void)shutdown;
@@ -47,9 +65,13 @@ extern NSString *const kToolbeltShouldHide;
 - (BOOL)showingToolWithName:(NSString *)theName;
 
 - (void)relayoutAllTools;
+- (void)restoreFromState:(NSDictionary *)state;
+- (NSDictionary *)restorableState;
+- (void)refreshTools;
 
 #pragma mark - Testing
 
 - (id<ToolbeltTool>)toolWithName:(NSString *)name;
+- (void)windowBackgroundColorDidChange;
 
 @end

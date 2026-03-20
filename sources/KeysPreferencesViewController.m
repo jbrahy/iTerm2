@@ -7,187 +7,453 @@
 //
 
 #import "KeysPreferencesViewController.h"
-#import "HotkeyWindowController.h"
+
+#import "DebugLogging.h"
 #import "ITAddressBookMgr.h"
-#import "iTermKeyBindingMgr.h"
+#import "iTermHotKeyController.h"
+#import "iTermHotkeyPreferencesWindowController.h"
+#import "iTermAppHotKeyProvider.h"
 #import "iTermKeyMappingViewController.h"
+#import "iTermKeyMappings.h"
+#import "iTermKeystrokeFormatter.h"
+#import "iTermModifierRemapper.h"
+#import "iTermNotificationController.h"
+#import "iTermPresetKeyMappings.h"
+#import "iTermTextPopoverViewController.h"
+#import "iTermTouchbarMappings.h"
+#import "iTermTuple.h"
+#import "iTermUserDefaults.h"
 #import "iTermWarning.h"
+#import "NSAppearance+iTerm.h"
+#import "NSArray+iTerm.h"
+#import "NSColor+iTerm.h"
+#import "NSEvent+iTerm.h"
 #import "NSPopUpButton+iTerm.h"
+#import "NSView+iTerm.h"
 #import "NSTextField+iTerm.h"
 #import "PreferencePanel.h"
 #import "PSMTabBarControl.h"
 
-static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
+#import "iTerm2SharedARC-Swift.h"
+
+static NSString *const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
+static NSString *const kKeyCode0MitigationSuffixGlobal = @"Global";
 
 @interface KeysPreferencesViewController () <iTermKeyMappingViewControllerDelegate>
 @end
 
 @implementation KeysPreferencesViewController {
-    IBOutlet NSPopUpButton *_controlButton;
+    IBOutlet NSPopUpButton *_leftControlButton;
+    IBOutlet NSPopUpButton *_rightControlButton;
     IBOutlet NSPopUpButton *_leftOptionButton;
     IBOutlet NSPopUpButton *_rightOptionButton;
     IBOutlet NSPopUpButton *_leftCommandButton;
     IBOutlet NSPopUpButton *_rightCommandButton;
+    IBOutlet NSPopUpButton *_functionButton;
+
+    IBOutlet NSButton *_resetRemappingButton;
+
+    IBOutlet NSTextField *_leftControlButtonLabel;
+    IBOutlet NSTextField *_rightControlButtonLabel;
+    IBOutlet NSTextField *_leftOptionButtonLabel;
+    IBOutlet NSTextField *_rightOptionButtonLabel;
+    IBOutlet NSTextField *_leftCommandButtonLabel;
+    IBOutlet NSTextField *_rightCommandButtonLabel;
+    IBOutlet NSTextField *_functionButtonLabel;
 
     IBOutlet NSPopUpButton *_switchPaneModifierButton;
     IBOutlet NSPopUpButton *_switchTabModifierButton;
     IBOutlet NSPopUpButton *_switchWindowModifierButton;
 
+    IBOutlet NSTextField *_switchPaneModifierButtonLabel;
+    IBOutlet NSTextField *_switchTabModifierButtonLabel;
+    IBOutlet NSTextField *_switchWindowModifierButtonLabel;
+
+    IBOutlet iTermKeyMappingViewController *_keyMappingViewController;
+    IBOutlet NSView *_keyMappingView;
+    IBOutlet NSView *_remapModifiersGlobally;
+
     // Hotkey
     IBOutlet NSButton *_hotkeyEnabled;
-    IBOutlet NSTextField *_hotkeyField;
+    IBOutlet NSTextField *_shortcutOverloaded;
+    IBOutlet iTermShortcutInputView *_hotkeyField;
     IBOutlet NSTextField *_hotkeyLabel;
+    IBOutlet NSButton *_configureHotKeyWindow;
+    IBOutlet NSButton *_emulateUSKeyboard;
 
-    // Hotkey opens dedicated window
-    IBOutlet NSButton *_hotkeyTogglesWindow;
-    IBOutlet NSButton *_hotkeyAutoHides;
-    IBOutlet NSPopUpButton *_hotkeyBookmark;
+    iTermHotkeyPreferencesWindowController *_hotkeyPanel;
+
+    IBOutlet NSTabView *_tabView;
+    IBOutlet iTermShortcutInputView *_leader;
+    IBOutlet NSButton *_leaderHelpButton;
+    iTermTextPopoverViewController *_popoverVC;
+    IBOutlet NSButton *_languageAgnosticKeyBindings;
+
+    IBOutlet NSButton *_forceKeyboard;
+    IBOutlet NSPopUpButton *_keyboardLocale;
+    IBOutlet NSButton *_allowSymbolicHotKeys;
+
+    IBOutlet NSButton *_repairKeyMappingsButton;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)updateNonDefaultIndicators {
+    [super updateNonDefaultIndicators];
+    [self updatePrivateNonDefaultInicators];
+}
+
+- (void)updatePrivateNonDefaultInicators {
+    _leader.it_showNonDefaultIndicator = [iTermPreferences boolForKey:kPreferenceKeyIndicateNonDefaultValues] && _leader.stringValue.length > 0;
 }
 
 - (void)awakeFromNib {
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(reloadAddressBookNotification:)
-                                                 name:kReloadAddressBookNotification
-                                               object:nil];
-    
     PreferenceInfo *info;
+    __weak __typeof(self) weakSelf = self;
+
+    _leader.leaderAllowed = NO;
+    _leader.purpose = @"as the leader";
+    iTermKeystroke *leaderKeystroke = [iTermKeyMappings leader];
+    _leader.stringValue = leaderKeystroke ? [iTermKeystrokeFormatter stringForKeystroke:leaderKeystroke] : @"";
+    [self updatePrivateNonDefaultInicators];
+
+    _hotkeyField.leaderAllowed = NO;
+    _hotkeyField.purpose = @"as a hotkey";
+
+    [_keyMappingViewController addViewsToSearchIndex:self];
+
+    [self defineControl:_languageAgnosticKeyBindings
+                    key:kPreferenceKeyLanguageAgnosticKeyBindings
+            relatedView:nil
+                   type:kPreferenceInfoTypeCheckbox];
 
     // Modifier remapping
-    info = [self defineControl:_controlButton
-                           key:kPreferenceKeyControlRemapping
+    info = [self defineControl:_leftControlButton
+                           key:kPreferenceKeyLeftControlRemapping
+                   relatedView:_leftControlButtonLabel
                           type:kPreferenceInfoTypePopup];
-    info.onChange = ^() { [self startEventTapIfNecessary]; };
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
+
+    info = [self defineControl:_rightControlButton
+                           key:kPreferenceKeyRightControlRemapping
+                   relatedView:_rightControlButtonLabel
+                          type:kPreferenceInfoTypePopup];
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
 
     info = [self defineControl:_leftOptionButton
                            key:kPreferenceKeyLeftOptionRemapping
+                   relatedView:_leftOptionButtonLabel
                           type:kPreferenceInfoTypePopup];
-    info.onChange = ^() { [self startEventTapIfNecessary]; };
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
 
     info = [self defineControl:_rightOptionButton
                            key:kPreferenceKeyRightOptionRemapping
+                   relatedView:_rightOptionButtonLabel
                           type:kPreferenceInfoTypePopup];
-    info.onChange = ^() { [self startEventTapIfNecessary]; };
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
 
     info = [self defineControl:_leftCommandButton
                            key:kPreferenceKeyLeftCommandRemapping
+                   relatedView:_leftCommandButtonLabel
                           type:kPreferenceInfoTypePopup];
-    info.onChange = ^() { [self startEventTapIfNecessary]; };
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
 
     info = [self defineControl:_rightCommandButton
                            key:kPreferenceKeyRightCommandRemapping
+                   relatedView:_rightCommandButtonLabel
                           type:kPreferenceInfoTypePopup];
-    info.onChange = ^() { [self startEventTapIfNecessary]; };
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
+
+    info = [self defineControl:_functionButton
+                           key:kPreferenceKeyFunctionRemapping
+                   relatedView:_functionButtonLabel
+                          type:kPreferenceInfoTypePopup];
+    info.onChange = ^() { [weakSelf startEventTapIfNecessary]; [weakSelf updateRemapLabelColors]; };
+    [self updateRemapLabelColors];
 
     // ---------------------------------------------------------------------------------------------
     // Modifiers for switching tabs/windows/panes.
     info = [self defineControl:_switchPaneModifierButton
                            key:kPreferenceKeySwitchPaneModifier
+                   relatedView:_switchPaneModifierButtonLabel
                           type:kPreferenceInfoTypePopup];
     info.onChange = ^() {
-        [self ensureUniqunessOfModifierForButton:_switchPaneModifierButton
-                                       inButtons:@[ _switchTabModifierButton,
-                                                    _switchWindowModifierButton ]];
-        [self postModifierChangedNotification];
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [weakSelf ensureUniquenessOfModifierForButton:strongSelf->_switchPaneModifierButton
+                                            inButtons:@[ strongSelf->_switchTabModifierButton,
+                                                         strongSelf->_switchWindowModifierButton ]];
+        [weakSelf postModifierChangedNotification];
     };
 
     info = [self defineControl:_switchTabModifierButton
                            key:kPreferenceKeySwitchTabModifier
+                   relatedView:_switchTabModifierButtonLabel
                           type:kPreferenceInfoTypePopup];
     info.onChange = ^() {
-        [self ensureUniqunessOfModifierForButton:_switchTabModifierButton
-                                       inButtons:@[ _switchPaneModifierButton,
-                                                    _switchWindowModifierButton ]];
-        [self postModifierChangedNotification];
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [weakSelf ensureUniquenessOfModifierForButton:strongSelf->_switchTabModifierButton
+                                            inButtons:@[ strongSelf->_switchPaneModifierButton,
+                                                         strongSelf->_switchWindowModifierButton ]];
+        [weakSelf postModifierChangedNotification];
     };
 
     info = [self defineControl:_switchWindowModifierButton
                            key:kPreferenceKeySwitchWindowModifier
+                   relatedView:_switchWindowModifierButtonLabel
                           type:kPreferenceInfoTypePopup];
     info.onChange = ^() {
-        [self ensureUniqunessOfModifierForButton:_switchWindowModifierButton
-                                       inButtons:@[ _switchTabModifierButton,
-                                                    _switchPaneModifierButton ]];
-        [self postModifierChangedNotification];
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [weakSelf ensureUniquenessOfModifierForButton:strongSelf->_switchWindowModifierButton
+                                            inButtons:@[ strongSelf->_switchTabModifierButton,
+                                                         strongSelf->_switchPaneModifierButton ]];
+        [weakSelf postModifierChangedNotification];
     };
 
     // ---------------------------------------------------------------------------------------------
     info = [self defineControl:_hotkeyEnabled
                            key:kPreferenceKeyHotkeyEnabled
+                   relatedView:nil
                           type:kPreferenceInfoTypeCheckbox];
-    info.onChange = ^() { [self hotkeyEnabledDidChange]; };
-    info.observer = ^() { [self updateHotkeyViews]; };
+    info.onChange = ^() { [weakSelf hotkeyEnabledDidChange]; };
+    info.observer = ^() { [weakSelf updateHotkeyViews]; };
 
-    info = [self defineControl:_hotkeyTogglesWindow
-                           key:kPreferenceKeyHotKeyTogglesWindow
+
+    info = [self defineControl:_forceKeyboard
+                           key:kPreferenceKeyForceKeyboard
+                   relatedView:nil
                           type:kPreferenceInfoTypeCheckbox];
-    info.onChange = ^() { [self hotkeyTogglesWindowDidChange]; };
+    info.observer = ^() { [weakSelf updateKeyboardLocaleEnabled]; };
 
-    info = [self defineControl:_hotkeyAutoHides
-                           key:kPreferenceKeyHotkeyAutoHides
+    info = [self defineControl:_allowSymbolicHotKeys
+                           key:kPreferenceKeyAllowSymbolicHotKeys
+                   relatedView:nil
                           type:kPreferenceInfoTypeCheckbox];
-    info.onChange = ^() { [self postRefreshNotification]; };
 
-    [self defineControl:_hotkeyBookmark
-                    key:kPreferenceKeyHotkeyProfileGuid
-                   type:kPreferenceInfoTypePopup
-         settingChanged:^(id sender) { [self hotkeyProfileDidChange]; }
-                 update:^BOOL { [self populateHotKeyProfilesMenu]; return YES; }];
-    [self populateHotKeyProfilesMenu];
+    info = [self defineControl:_keyboardLocale
+                           key:kPreferenceKeyKeyboardLocale
+                   displayName:@"Keyboard locale"
+                          type:kPreferenceInfoTypeStringPopup];
+
+    [self defineControl:_remapModifiersGlobally
+                    key:kPreferenceKeyRemapModifiersGlobally
+            relatedView:nil
+                   type:kPreferenceInfoTypeCheckbox];
+
+    [self rebuildKeyboardLocales];
+    [self updateKeyboardLocaleEnabled];
+
+    [self updateDuplicateWarning];
+
+    [self defineControl:_emulateUSKeyboard
+                    key:kPreferenceKeyEmulateUSKeyboard
+            relatedView:nil
+                   type:kPreferenceInfoTypeCheckbox];
+
+    [self addViewToSearchIndex:_keyMappingView
+                   displayName:@"Global key bindings"
+                       phrases:@[ @"mapping", @"shortcuts", @"touch bar", @"preset", @"xterm", @"natural", @"terminal.app compatibility", @"numeric keypad" ]
+                           key:nil];
+
 }
 
-- (void)ensureUniqunessOfModifierForButton:(NSPopUpButton *)buttonThatChanged
-                                 inButtons:(NSArray *)buttons {
+- (void)rebuildKeyboardLocales {
+    while (_keyboardLocale.menu.numberOfItems > 0) {
+        [_keyboardLocale.menu removeItemAtIndex:0];
+    }
+
+    // Convert system input sources into (display name, identifier) tuples.
+    NSMutableArray<iTermTuple<NSString *, NSString *>  *> *items = [NSMutableArray array];
+    CFArrayRef inputSources = TISCreateInputSourceList(NULL, NO);
+    for (NSInteger i = 0; i < CFArrayGetCount(inputSources); i++) {
+        TISInputSourceRef inputSource = (TISInputSourceRef)CFArrayGetValueAtIndex(inputSources, i);
+        CFStringRef category = (CFStringRef)TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceCategory);
+        if (category == NULL) {
+            continue;
+        }
+        if (CFStringCompare(category, kTISCategoryKeyboardInputSource, 0) != kCFCompareEqualTo) {
+            continue;
+        }
+        CFStringRef inputSourceID = (CFStringRef)TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceID);
+        CFStringRef localizedName = (CFStringRef)TISGetInputSourceProperty(inputSource, kTISPropertyLocalizedName);
+        NSString *displayName = (__bridge NSString *)localizedName;
+        [items addObject:[iTermTuple tupleWithObject:displayName andObject:(__bridge NSString *)inputSourceID]];
+    }
+    CFRelease(inputSources);
+
+    // Sort by display name.
+    [items sortUsingComparator:^NSComparisonResult(iTermTuple *lhs, iTermTuple *rhs) {
+        return [lhs.firstObject localizedCaseInsensitiveCompare:rhs.firstObject];
+    }];
+
+    // Add each as a menu item.
+    [items enumerateObjectsUsingBlock:^(iTermTuple<NSString *,NSString *> * _Nonnull tuple, NSUInteger idx, BOOL * _Nonnull stop) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:tuple.firstObject
+                                                      action:nil
+                                               keyEquivalent:@""];
+        item.representedObject = tuple.secondObject;
+        [_keyboardLocale.menu addItem:item];
+    }];
+
+    NSString *identifier = [self stringForKey:kPreferenceKeyKeyboardLocale];
+    NSInteger i = -1;
+    if (identifier) {
+        i = [_keyboardLocale indexOfItemWithRepresentedObject:identifier];
+    }
+    [_keyboardLocale selectItemAtIndex:i];
+}
+
+- (void)updateKeyboardLocaleEnabled {
+    _keyboardLocale.enabled = [self boolForKey:kPreferenceKeyForceKeyboard];
+}
+
+- (void)viewWillAppear {
+    [self updateDuplicateWarning];
+    [self updateRepairKeyMappingsButtonVisibility];
+}
+
+- (iTermHotKeyDescriptor *)hotkeyDescriptor {
+    int theChar = [iTermPreferences intForKey:kPreferenceKeyHotkeyCharacter];
+    int modifiers = [iTermPreferences intForKey:kPreferenceKeyHotkeyModifiers];
+    int code = [iTermPreferences intForKey:kPreferenceKeyHotKeyCode];
+    if (code || theChar) {
+        return [NSDictionary descriptorWithKeyCode:code modifiers:modifiers];
+    } else {
+        return nil;
+    }
+}
+
+- (void)updateDuplicateWarning {
+    NSArray<iTermHotKeyDescriptor *> *descriptors = [[iTermHotKeyController sharedInstance] descriptorsForProfileHotKeysExcept:nil];
+    _shortcutOverloaded.hidden = ![descriptors containsObject:[self hotkeyDescriptor]];
+}
+
+- (void)ensureUniquenessOfModifierForButton:(NSPopUpButton *)buttonThatChanged
+                                  inButtons:(NSArray *)buttons {
     if (buttonThatChanged.selectedTag == kPreferenceModifierTagNone) {
         return;
     }
     for (NSPopUpButton *button in buttons) {
         if (button.selectedTag == buttonThatChanged.selectedTag) {
             [button selectItemWithTag:kPreferenceModifierTagNone];
+            PreferenceInfo *info = [self infoForControl:button];
+            [self setInt:kPreferenceModifierTagNone forKey:info.key];
         }
     }
 }
 
-- (void)hotkeyProfileDidChange {
-    [iTermPreferences setString:[[_hotkeyBookmark selectedItem] representedObject]
-                         forKey:kPreferenceKeyHotkeyProfileGuid];
-    [[HotkeyWindowController sharedInstance] saveHotkeyWindowState];
-}
-
-- (void)hotkeyTogglesWindowDidChange {
-    if ([iTermPreferences boolForKey:kPreferenceKeyHotKeyTogglesWindow] &&
-        ![[ProfileModel sharedInstance] bookmarkWithName:kHotkeyWindowGeneratedProfileNameKey]) {
-        // User's turning on hotkey window. There is no bookmark with the autogenerated name.
-        [self generateHotkeyWindowProfile];
-        [_hotkeyBookmark selectItemWithTitle:kHotkeyWindowGeneratedProfileNameKey];
-        [self hotkeyProfileDidChange];
-        NSRunAlertPanel(@"Set Up Hotkey Window",
-                        @"A new profile called \"%@\" was created for you. It is tuned to work well "
-                        @"for the Hotkey Window feature and can be customized in the Profiles tab.",
-                        @"OK",
-                        nil,
-                        nil,
-                        kHotkeyWindowGeneratedProfileNameKey);
-    }
-    [self updateHotkeyViews];
-}
-
 - (void)generateHotkeyWindowProfile {
-    NSMutableDictionary* dict = [NSMutableDictionary dictionaryWithDictionary:[[ProfileModel sharedInstance] defaultBookmark]];
-    [dict setObject:[NSNumber numberWithInt:WINDOW_TYPE_TOP] forKey:KEY_WINDOW_TYPE];
-    [dict setObject:[NSNumber numberWithInt:25] forKey:KEY_ROWS];
-    [dict setObject:[NSNumber numberWithFloat:0.3] forKey:KEY_TRANSPARENCY];
-    [dict setObject:[NSNumber numberWithFloat:0.5] forKey:KEY_BLEND];
-    [dict setObject:[NSNumber numberWithFloat:2.0] forKey:KEY_BLUR_RADIUS];
-    [dict setObject:[NSNumber numberWithBool:YES] forKey:KEY_BLUR];
-    [dict setObject:[NSNumber numberWithInt:-1] forKey:KEY_SCREEN];
-    [dict setObject:[NSNumber numberWithInt:-1] forKey:KEY_SPACE];
-    [dict setObject:@"" forKey:KEY_SHORTCUT];
-    [dict setObject:kHotkeyWindowGeneratedProfileNameKey forKey:KEY_NAME];
-    [dict removeObjectForKey:KEY_TAGS];
-    [dict setObject:@"No" forKey:KEY_DEFAULT_BOOKMARK];
-    [dict setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
-    [[ProfileModel sharedInstance] addBookmark:dict];
-    [[ProfileModel sharedInstance] flush];
+    NSArray<iTermProfileHotKey *> *profileHotKeys = [[iTermHotKeyController sharedInstance] profileHotKeys];
+    if (profileHotKeys.count > 0) {
+        NSArray<NSString *> *names = [profileHotKeys mapWithBlock:^id(iTermProfileHotKey *profileHotKey) {
+            return [NSString stringWithFormat:@"“%@”", profileHotKey.profile[KEY_NAME]];
+        }];
+        NSString *joinedNames = [names componentsJoinedWithOxfordComma];
+        NSString *namesSentence = nil;
+        NSArray *actions = @[ @"OK", @"Cancel"];
+
+        iTermWarningSelection cancel = kiTermWarningSelection1;
+        iTermWarningSelection edit = kItermWarningSelectionError;
+
+        if (profileHotKeys.count == 1) {
+            namesSentence = [NSString stringWithFormat:@"You already have a Profile with a Hotkey Window named %@", joinedNames];
+            actions = @[ @"OK", @"Configure Existing Profile", @"Cancel"];
+            edit = kiTermWarningSelection1;
+            cancel = kiTermWarningSelection2;
+        } else {
+            namesSentence = [NSString stringWithFormat:@"You already have Profiles with Hotkey Windows named %@", joinedNames];
+        }
+        namesSentence = [namesSentence stringByInsertingTerminalPunctuation:@"."];
+
+        iTermWarningSelection selection = [iTermWarning showWarningWithTitle:[NSString stringWithFormat:@"%@", namesSentence]
+                                                                     actions:actions
+                                                                   accessory:nil
+                                                                  identifier:@"NoSyncSuppressAddAnotherHotkeyProfileWarning"
+                                                                 silenceable:kiTermWarningTypePersistent
+                                                                     heading:@"Add Another Hotkey Window Profile?"
+                                                                      window:self.view.window];
+        if (selection == cancel) {
+            return;
+        } else if (selection == edit) {
+            [[PreferencePanel sharedInstance] configureHotkeyForProfile:[profileHotKeys.firstObject profile]];
+        }
+    }
+    iTermHotkeyPreferencesModel *model = [[iTermHotkeyPreferencesModel alloc] init];
+    _hotkeyPanel = [[iTermHotkeyPreferencesWindowController alloc] init];
+    [_hotkeyPanel setExplanation:@"This panel helps you configure a new profile that will be bound to a keystroke you assign. Pressing the hotkey (even when iTerm2 is not active) will toggle a special window."];
+    _hotkeyPanel.descriptorsInUseByOtherProfiles = [[iTermHotKeyController sharedInstance] descriptorsForProfileHotKeysExcept:nil];
+    _hotkeyPanel.model = model;
+
+    [self.view.window beginSheet:_hotkeyPanel.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSModalResponseOK) {
+            if (!model.hotKeyAssigned) {
+                return;
+            }
+            NSMutableDictionary *dict = [[[ProfileModel sharedInstance] defaultBookmark] mutableCopy];
+            dict[KEY_WINDOW_TYPE] = @(WINDOW_TYPE_TOP_PERCENTAGE);
+            dict[KEY_WIDTH_PERCENTAGE] = @100;
+            dict[KEY_HEIGHT_PERCENTAGE] = @-1;
+            dict[KEY_ROWS] = @25;
+            dict[KEY_TRANSPARENCY] = @0.3;
+            dict[KEY_INITIAL_USE_TRANSPARENCY] = @YES;
+            dict[KEY_BLEND] = @0.5;
+            dict[KEY_BLUR_RADIUS] = @2.0;
+            dict[KEY_BLUR] = @YES;
+            dict[KEY_SCREEN] = @-1;
+            dict[KEY_SPACE] = @(iTermProfileJoinsAllSpaces);
+            dict[KEY_SHORTCUT] = @"";
+            NSString *newProfileName = kHotkeyWindowGeneratedProfileNameKey;
+            NSInteger number = 1;
+            while ([[ProfileModel sharedInstance] bookmarkWithName:newProfileName]) {
+                newProfileName = [NSString stringWithFormat:@"%@ (%@)", kHotkeyWindowGeneratedProfileNameKey, @(number)];
+                number++;
+            }
+            dict[KEY_NAME] = newProfileName;
+            dict[KEY_DEFAULT_BOOKMARK] = @"No";
+            dict[KEY_GUID] = [ProfileModel freshGuid];
+
+            // Assign cmd-t to "new tab with profile" with this profile.
+            NSMutableDictionary *keyboardMap = [dict[KEY_KEYBOARD_MAP] ?: @{} mutableCopy];
+            iTermKeyBindingAction *action = [iTermKeyBindingAction withAction:KEY_ACTION_NEW_TAB_WITH_PROFILE
+                                                                    parameter:dict[KEY_GUID]
+                                                                     escaping:iTermSendTextEscapingCommon
+                                                                    applyMode:iTermActionApplyModeCurrentSession];
+            iTermKeystroke *keystroke = [iTermKeystroke withCharacter:'t' modifierFlags:NSEventModifierFlagCommand];
+            keyboardMap[keystroke.serialized] = action.dictionaryValue;
+            dict[KEY_KEYBOARD_MAP] = keyboardMap;
+
+            [dict removeObjectForKey:KEY_TAGS];
+
+            // Copy values from the profile model's generated dictionary.
+            [model.dictionaryValue enumerateKeysAndObjectsUsingBlock:^(NSString *_Nonnull key,
+                                                                       id _Nonnull obj,
+                                                                       BOOL *_Nonnull stop) {
+                [dict setObject:obj forKey:key];
+            }];
+            [[ProfileModel sharedInstance] addBookmark:dict];
+            [[ProfileModel sharedInstance] flush];
+            [[NSNotificationCenter defaultCenter] postNotificationName:kReloadAllProfiles
+                                                                object:nil
+                                                              userInfo:nil];
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Hotkey Window Successfully Configured";
+            alert.informativeText = [NSString stringWithFormat:@"A new profile called “%@” was created for you. It is tuned to work well "
+                                     @"for the Hotkey Window feature and it can be customized in the Profiles tab.",
+                                     newProfileName];
+            [alert addButtonWithTitle:@"OK"];
+            [alert runModal];
+        }
+    }];
 }
 
 - (void)hotkeyEnabledDidChange {
@@ -197,15 +463,14 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
         int modifiers = [iTermPreferences intForKey:kPreferenceKeyHotkeyModifiers];
         int code = [iTermPreferences intForKey:kPreferenceKeyHotKeyCode];
         if (!theChar) {
-            [self setHotKeyChar:' ' code:kVK_Space mods:NSAlternateKeyMask];
+            [self setHotKeyChar:' ' code:kVK_Space mods:NSEventModifierFlagOption];
         } else {
             [self setHotKeyChar:theChar code:code mods:modifiers];
         }
     } else {
-        [[HotkeyWindowController sharedInstance] unregisterHotkey];
+        [[iTermAppHotKeyProvider sharedInstance] invalidate];
         [self updateHotkeyViews];
     }
-    [[HotkeyWindowController sharedInstance] saveHotkeyWindowState];
 }
 
 - (void)updateHotkeyViews {
@@ -214,8 +479,12 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
     int modifiers = [iTermPreferences intForKey:kPreferenceKeyHotkeyModifiers];
     int code = [iTermPreferences intForKey:kPreferenceKeyHotKeyCode];
     if (code || theChar) {
-        NSString *identifier = [NSString stringWithFormat:@"0x%x-0x%x", theChar, modifiers];
-        _hotkeyField.stringValue = [iTermKeyBindingMgr formatKeyCombination:identifier];
+        iTermKeystroke *keystroke = [[iTermKeystroke alloc] initWithVirtualKeyCode:code
+                                                                        hasKeyCode:YES
+                                                                     modifierFlags:modifiers
+                                                                         character:theChar
+                                                                 modifiedCharacter:theChar];
+        _hotkeyField.stringValue = [iTermKeystrokeFormatter stringForKeystroke:keystroke];
     } else {
         _hotkeyField.stringValue = @"";
     }
@@ -224,20 +493,8 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
     BOOL isEnabled = [iTermPreferences boolForKey:kPreferenceKeyHotkeyEnabled];
     _hotkeyField.enabled = isEnabled;
     _hotkeyLabel.labelEnabled = isEnabled;
-    _hotkeyTogglesWindow.enabled = isEnabled;
-
-    BOOL hasDedicatedWindow = [iTermPreferences boolForKey:kPreferenceKeyHotKeyTogglesWindow];
-    _hotkeyAutoHides.enabled = isEnabled && hasDedicatedWindow;
-    _hotkeyBookmark.enabled = isEnabled && hasDedicatedWindow;
+    [self updateDuplicateWarning];
 }
-
-- (void)registerHotkey {
-    int modifiers = [iTermPreferences intForKey:kPreferenceKeyHotkeyModifiers];
-    int code = [iTermPreferences intForKey:kPreferenceKeyHotKeyCode];
-    [[HotkeyWindowController sharedInstance] registerHotkey:code
-                                                  modifiers:modifiers];
-}
-
 
 // Set the local copy of the hotkey, update the pref panel, and register it after a delay.
 - (void)setHotKeyChar:(unsigned short)keyChar
@@ -250,15 +507,39 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
     PreferencePanel *prefs = [PreferencePanel sharedInstance];
     [prefs.window makeFirstResponder:prefs.window];
     [self updateHotkeyViews];
-    [self performSelector:@selector(registerHotkey) withObject:self afterDelay:0.01];
+    [[iTermAppHotKeyProvider sharedInstance] invalidate];
 }
 
+- (NSArray<iTermTuple<NSControl *, NSNumber *> *> *)modifierRemappingTuples {
+    return @[[iTermTuple tupleWithObject:_leftControlButton andObject:@(kPreferencesModifierTagLeftControl)],
+             [iTermTuple tupleWithObject:_rightControlButton andObject:@(kPreferencesModifierTagRightControl)],
+             [iTermTuple tupleWithObject:_leftOptionButton andObject:@(kPreferencesModifierTagLeftOption)],
+             [iTermTuple tupleWithObject:_rightOptionButton andObject:@(kPreferencesModifierTagRightOption)],
+             [iTermTuple tupleWithObject:_leftCommandButton andObject:@(kPreferencesModifierTagLeftCommand)],
+             [iTermTuple tupleWithObject:_rightCommandButton andObject:@(kPreferencesModifierTagRightCommand)],
+             [iTermTuple tupleWithObject:_functionButton andObject:@(kPreferenceModifierTagFunction)]];
+}
 
 - (void)startEventTapIfNecessary {
-    if (([[HotkeyWindowController sharedInstance] isAnyModifierRemapped] &&
-         ![[HotkeyWindowController sharedInstance] haveEventTap])) {
-        [[HotkeyWindowController sharedInstance] beginRemappingModifiers];
+    if ([[iTermModifierRemapper sharedInstance] isAnyModifierRemapped]) {
+        [[iTermModifierRemapper sharedInstance] setRemapModifiers:YES];
     }
+}
+
+- (void)updateRemapLabelColors {
+    BOOL remappingAnyModifier = NO;
+    for (iTermTuple<NSControl *, NSNumber *> *tuple in [self modifierRemappingTuples]) {
+        PreferenceInfo *info = [self infoForControl:tuple.firstObject];
+        NSTextField *textField = [NSTextField castFrom:info.relatedView];
+        if ([self intForKey:info.key] == tuple.secondObject.intValue) {
+            textField.textColor = [NSColor controlTextColor];
+        } else {
+            remappingAnyModifier = YES;
+            textField.textColor = [NSColor it_blue];
+        }
+    }
+
+    _resetRemappingButton.enabled = remappingAnyModifier;
 }
 
 - (void)postModifierChangedNotification {
@@ -269,31 +550,83 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
                                                       userInfo:userInfo];
 }
 
-- (void)populateHotKeyProfilesMenu {
-    if (!_hotkeyBookmark) {
-        return;
+#pragma mark - Actions
+
+- (IBAction)resetModifierRemapping:(id)sender {
+    for (iTermTuple<NSControl *, NSNumber *> *tuple in [self modifierRemappingTuples]) {
+        PreferenceInfo *info = [self infoForControl:tuple.firstObject];
+        [self setObject:tuple.secondObject forKey:info.key];
+        [self updateValueForInfo:info];
     }
-    NSString *guid = [iTermPreferences stringForKey:kPreferenceKeyHotkeyProfileGuid];
-    [_hotkeyBookmark populateWithProfilesSelectingGuid:guid];
+    [self startEventTapIfNecessary];
+    [self updateRemapLabelColors];
+}
+
+- (IBAction)configureHotKeyWindow:(id)sender {
+    [self generateHotkeyWindowProfile];
+}
+
+- (IBAction)emulateUsKeyboardHelp:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Emulate US Keyboard";
+    alert.informativeText = @"Some keyboard layouts (such as AZERTY) require a modifier to press a number key. This causes problems for switching to a window, tab, or split pane by pressing modifier+number: you might need other modifiers or conflicting modifiers. When “Emulate US Keyboard” is enabled, you can press the configured modifier plus the key on the top row that corresponds to a number key on a US keyboard. For example, on AZERTY, the & key would act as the 1 key.";
+    [alert runModal];
+}
+
+- (IBAction)showLeaderHelp:(id)sender {
+    [_popoverVC.popover close];
+    _popoverVC = [[iTermTextPopoverViewController alloc] initWithNibName:@"iTermTextPopoverViewController"
+                                                                  bundle:[NSBundle bundleForClass:self.class]];
+    _popoverVC.popover.behavior = NSPopoverBehaviorTransient;
+    [_popoverVC view];
+    _popoverVC.textView.font = [NSFont systemFontOfSize:[NSFont systemFontSize]];
+    _popoverVC.textView.drawsBackground = NO;
+    [_popoverVC appendString:@"The leader behaves like a modifier key, such as Command or Option, but is a separate keystroke. It can be used in key bindings. For example, if you set the leader to ⌘b then you could bind an action to the two-keystroke sequence “⌘b x”. ⌘b is the recommended leader and that keystroke will not be used for other purposes in the future."];
+    NSRect frame = _popoverVC.view.frame;
+    frame.size.width = 300;
+    frame.size.height = 108;
+    _popoverVC.view.frame = frame;
+    [_popoverVC.popover showRelativeToRect:_leaderHelpButton.bounds
+                                    ofView:_leaderHelpButton
+                             preferredEdge:NSRectEdgeMaxY];
 }
 
 #pragma mark - iTermShortcutInputViewDelegate
 
 - (void)shortcutInputView:(iTermShortcutInputView *)view didReceiveKeyPressEvent:(NSEvent *)event {
-    unsigned int keyMods;
-    NSString *unmodkeystr;
+    if (view == _hotkeyField) {
+        unsigned int keyMods;
+        NSString *unmodkeystr;
 
-    keyMods = [event modifierFlags];
-    unmodkeystr = [event charactersIgnoringModifiers];
-    unsigned short keyChar = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
-    unsigned int keyCode = [event keyCode];
+        keyMods = [event it_modifierFlags];
+        unmodkeystr = [event charactersIgnoringModifiers];
+        unsigned short keyChar = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
+        unsigned int keyCode = [event keyCode];
 
-    [self setHotKeyChar:keyChar code:keyCode mods:keyMods];
+        [self setHotKeyChar:keyChar code:keyCode mods:keyMods];
+
+        if (!event) {
+            BOOL wasEnabled = [self boolForKey:kPreferenceKeyHotkeyEnabled];
+            [self setBool:NO forKey:kPreferenceKeyHotkeyEnabled];
+            if (wasEnabled) {
+                [self hotkeyEnabledDidChange];
+                _hotkeyEnabled.state = NSControlStateValueOff;
+            }
+        }
+    } else if (view == _leader) {
+        if (event) {
+            iTermKeystroke *keystroke = [iTermKeystroke withEvent:event];
+            [iTermKeyMappings setLeader:keystroke];
+        } else {
+            [iTermKeyMappings setLeader:nil];
+        }
+        [self updatePrivateNonDefaultInicators];
+    }
 }
 
-- (BOOL)anyBookmarkHasKeyMapping:(NSString*)theString {
-    for (Profile* bookmark in [[ProfileModel sharedInstance] bookmarks]) {
-        if ([iTermKeyBindingMgr haveKeyMappingForKeyString:theString inBookmark:bookmark]) {
+- (BOOL)anyProfileHasMappingForKeystroke:(iTermKeystroke *)keystroke {
+    for (Profile *profile in [[ProfileModel sharedInstance] bookmarks]) {
+        if ([iTermKeyMappings haveKeyMappingForKeystroke:keystroke inProfile:profile]) {
             return YES;
         }
     }
@@ -305,7 +638,8 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
                                                @"Check your profiles’ keyboard settings if it doesn't work as expected."
                                        actions:@[ @"OK", @"Cancel" ]
                                     identifier:@"NeverWarnAboutPossibleOverrides"
-                                   silenceable:kiTermWarningTypePermanentlySilenceable]) {
+                                   silenceable:kiTermWarningTypePermanentlySilenceable
+                                        window:self.view.window]) {
         case kiTermWarningSelection1:
             return NO;
         default:
@@ -317,66 +651,211 @@ static NSString * const kHotkeyWindowGeneratedProfileNameKey = @"Hotkey Window";
 #pragma mark - iTermKeyMappingViewControllerDelegate
 
 - (NSDictionary *)keyMappingDictionary:(iTermKeyMappingViewController *)viewController {
-    return [iTermKeyBindingMgr globalKeyMap];
+    return [iTermKeyMappings globalKeyMap];
 }
 
-- (NSArray *)keyMappingSortedKeys:(iTermKeyMappingViewController *)viewController {
-    return [iTermKeyBindingMgr sortedGlobalKeyCombinations];
+- (NSArray<iTermKeystroke *> *)keyMappingSortedKeystrokes:(iTermKeyMappingViewController *)viewController {
+    return [iTermKeyMappings sortedGlobalKeystrokes];
+}
+
+- (NSArray<iTermTouchbarItem *> *)keyMappingSortedTouchbarItems:(iTermKeyMappingViewController *)viewController {
+    NSDictionary *dict = [iTermTouchbarMappings globalTouchBarMap];
+    return [iTermTouchbarMappings sortedTouchbarItemsInDictionary:dict];
+}
+
+- (NSDictionary *)keyMappingTouchBarItems {
+    return [iTermTouchbarMappings globalTouchBarMap];
+}
+
+- (ProfileType)keyMappingProfileType:(iTermKeyMappingViewController *)viewController {
+    return ProfileTypeAll;
+}
+
+- (BOOL)keyMapping:(iTermKeyMappingViewController *)viewController shouldImportKeystrokes:(NSSet<iTermKeystroke *> *)keystrokesThatWillChange {
+    NSSet<iTermKeystroke *> *keystrokesInGlobalMapping = [iTermKeyMappings keystrokesInGlobalMapping];
+    if (![keystrokesInGlobalMapping isSubsetOfSet:keystrokesThatWillChange]) {
+        NSNumber *n = [viewController removeBeforeLoading:@"importing mappings"];
+        if (!n) {
+            return NO;
+        }
+        if (n.boolValue) {
+            [iTermKeyMappings removeAllGlobalKeyMappings];
+        }
+    }
+    return YES;
 }
 
 - (void)keyMapping:(iTermKeyMappingViewController *)viewController
- didChangeKeyCombo:(NSString *)keyCombo
-            atIndex:(NSInteger)index
-          toAction:(int)action
-         parameter:(NSString *)parameter
+     didChangeItem:(iTermKeystrokeOrTouchbarItem *)item
+           atIndex:(NSInteger)index
+          toAction:(iTermKeyBindingAction *)action
         isAddition:(BOOL)addition {
-    NSMutableDictionary *dict =
-            [NSMutableDictionary dictionaryWithDictionary:[iTermKeyBindingMgr globalKeyMap]];
-    if ([self anyBookmarkHasKeyMapping:keyCombo]) {
-        if (![self warnAboutPossibleOverride]) {
-            return;
+    [iTermKeyMappings suppressNotifications:^{
+        [item whenFirst:
+         ^(iTermKeystroke * _Nonnull keystroke) {
+            NSMutableDictionary *dict = [[iTermKeyMappings globalKeyMap] mutableCopy];
+            if ([self anyProfileHasMappingForKeystroke:keystroke]) {
+                if (![self warnAboutPossibleOverride]) {
+                    return;
+                }
+            }
+            [iTermKeyMappings setMappingAtIndex:index
+                                   forKeystroke:keystroke
+                                         action:action
+                                      createNew:addition
+                                   inDictionary:dict];
+            [iTermKeyMappings setGlobalKeyMap:dict];
         }
-    }
-    [iTermKeyBindingMgr setMappingAtIndex:index
-                                   forKey:keyCombo
-                                   action:action
-                                    value:parameter
-                                createNew:addition
-                             inDictionary:dict];
-    [iTermKeyBindingMgr setGlobalKeyMap:dict];
+                 second:
+         ^(iTermTouchbarItem * _Nonnull touchbarItem) {
+            NSMutableDictionary *dict = [[iTermTouchbarMappings globalTouchBarMap] mutableCopy];
+            [iTermTouchbarMappings updateDictionary:dict
+                                    forTouchbarItem:touchbarItem
+                                             action:action];
+            [iTermTouchbarMappings setGlobalTouchBarMap:dict];
+            [self maybeExplainHowToEditTouchBarControls];
+        }];
+    }];
+
     [[NSNotificationCenter defaultCenter] postNotificationName:kKeyBindingsChangedNotification
                                                         object:nil
                                                       userInfo:nil];
 }
 
+- (void)maybeExplainHowToEditTouchBarControls {
+    if ([iTermUserDefaults haveExplainedHowToAddTouchbarControls]) {
+        return;
+    }
+    if ([[iTermTouchbarMappings globalTouchBarMap] count] != 1) {
+        return;
+    }
+    [[iTermNotificationController sharedInstance] notify:@"Touch Bar Item Added"
+                                         withDescription:@"Select View > Customize Touch Bar to enable your new touch bar item."];
+    [iTermUserDefaults setHaveExplainedHowToAddTouchbarControls:YES];
+}
 
 - (void)keyMapping:(iTermKeyMappingViewController *)viewController
-    removeKeyCombo:(NSString *)keyCombo {
-    NSUInteger index = [[iTermKeyBindingMgr sortedGlobalKeyCombinations] indexOfObject:keyCombo];
-    assert(index != NSNotFound);
-    [iTermKeyBindingMgr setGlobalKeyMap:[iTermKeyBindingMgr removeMappingAtIndex:index
-                                                                    inDictionary:[iTermKeyBindingMgr globalKeyMap]]];
+  removeKeystrokes:(NSSet<iTermKeystroke *> *)keystrokes
+     touchbarItems:(NSSet<iTermTouchbarItem *> *)touchbarItems {
+    [iTermKeyMappings suppressNotifications:^{
+        [keystrokes enumerateObjectsUsingBlock:^(iTermKeystroke * _Nonnull keystroke, BOOL * _Nonnull stop) {
+            NSUInteger index = [[iTermKeyMappings sortedGlobalKeystrokes] indexOfObject:keystroke];
+            assert(index != NSNotFound);
+            [iTermKeyMappings setGlobalKeyMap:[iTermKeyMappings removeMappingAtIndex:index
+                                                                        inDictionary:[iTermKeyMappings globalKeyMap]]];
+        }];
+        [touchbarItems enumerateObjectsUsingBlock:^(iTermTouchbarItem * _Nonnull touchbarItem, BOOL * _Nonnull stop) {
+            [iTermTouchbarMappings removeTouchbarItem:touchbarItem];
+        }];
+    }];
+
+    // iTermKeyMappings posts this for you but iTermTouchbarMappings does not.
     [[NSNotificationCenter defaultCenter] postNotificationName:kKeyBindingsChangedNotification
                                                         object:nil
                                                       userInfo:nil];
 }
 
 - (NSArray *)keyMappingPresetNames:(iTermKeyMappingViewController *)viewController {
-    return [iTermKeyBindingMgr globalPresetNames];
+    return [iTermPresetKeyMappings globalPresetNames];
 }
 
 - (void)keyMapping:(iTermKeyMappingViewController *)viewController
   loadPresetsNamed:(NSString *)presetName {
-    [iTermKeyBindingMgr setGlobalKeyMappingsToPreset:presetName];
+
+    NSSet<iTermKeystroke *> *keystrokesThatWillChange = [iTermPresetKeyMappings keystrokesInGlobalPreset:presetName];
+    NSSet<iTermKeystroke *> *keystrokesInGlobalMapping = [iTermKeyMappings keystrokesInGlobalMapping];
+    BOOL replaceAll = YES;
+    if (![keystrokesInGlobalMapping isSubsetOfSet:keystrokesThatWillChange]) {
+        NSNumber *n = [viewController removeBeforeLoading:@"loading preset"];
+        if (!n) {
+            return;
+        }
+        replaceAll = n.boolValue;
+    }
+
+    [iTermKeyMappings suppressNotifications:^{
+        [iTermPresetKeyMappings setGlobalKeyMappingsToPreset:presetName byReplacingAll:replaceAll];
+    }];
     [[NSNotificationCenter defaultCenter] postNotificationName:kKeyBindingsChangedNotification
                                                         object:nil
                                                       userInfo:nil];
 }
 
-#pragma mark - Notification handlers
+- (NSNumber *)removeBeforeLoading:(NSString *)thing {
+    const iTermWarningSelection selection =
+    [iTermWarning showWarningWithTitle:[NSString stringWithFormat:@"Remove all key mappings before loading %@?", thing]
+                               actions:@[ @"Keep", @"Remove", @"Cancel" ]
+                             accessory:nil
+                            identifier:@"RemoveExistingGlobalKeyMappingsBeforeLoading"
+                           silenceable:kiTermWarningTypePersistent
+                               heading:@"Load Preset"
+                                window:self.view.window];
+    switch (selection) {
+        case kiTermWarningSelection0:
+            return @NO;
+        case kiTermWarningSelection1:
+            return @YES;
+        case kiTermWarningSelection2:
+            return nil;
+        default:
+            assert(NO);
+    }
+    return nil;
+}
 
-- (void)reloadAddressBookNotification:(NSNotification *)aNotification {
-    [self populateHotKeyProfilesMenu];
+- (NSTabView *)tabView {
+    return _tabView;
+}
+
+- (CGFloat)minimumWidth {
+    return 468;
+}
+
+#pragma mark - Corrupted Key Mapping Repair
+
+- (void)updateRepairKeyMappingsButtonVisibility {
+    if (!_repairKeyMappingsButton) {
+        return;
+    }
+
+    if ([iTermKeyMappingRepair isMitigationDisabledWithSuffix:kKeyCode0MitigationSuffixGlobal]) {
+        _repairKeyMappingsButton.hidden = YES;
+        return;
+    }
+
+    NSDictionary *globalMap = [iTermKeyMappings globalKeyMap];
+    NSArray<NSString *> *corrupted = [iTermKeyMappingRepair corruptedKeyBindingsIn:globalMap];
+    BOOL hasCorrupted = corrupted.count > 0;
+    _repairKeyMappingsButton.hidden = !hasCorrupted;
+
+    // If no corrupted bindings found, disable the mitigation so we don't check again
+    if (!hasCorrupted) {
+        [iTermKeyMappingRepair setMitigationDisabled:YES suffix:kKeyCode0MitigationSuffixGlobal];
+    }
+}
+
+- (IBAction)repairKeyMappings:(id)sender {
+    NSDictionary *globalMap = [iTermKeyMappings globalKeyMap];
+    if (![iTermKeyMappingRepair confirmRepairWithKeyMappings:globalMap window:self.view.window]) {
+        return;
+    }
+
+    NSDictionary *repaired = [iTermKeyMappingRepair repairedKeyMappings:globalMap];
+    [iTermKeyMappings setGlobalKeyMap:repaired];
+
+    // Disable the mitigation now that we've repaired
+    [iTermKeyMappingRepair setMitigationDisabled:YES suffix:kKeyCode0MitigationSuffixGlobal];
+
+    // Hide the button
+    _repairKeyMappingsButton.hidden = YES;
+
+    // Notify that key bindings changed
+    [[NSNotificationCenter defaultCenter] postNotificationName:kKeyBindingsChangedNotification
+                                                        object:nil
+                                                      userInfo:nil];
+
+    // Reload the key mapping view
+    [_keyMappingViewController reloadData];
 }
 
 @end

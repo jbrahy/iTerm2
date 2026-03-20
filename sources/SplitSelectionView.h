@@ -10,45 +10,50 @@
 
 #import <Cocoa/Cocoa.h>
 
-typedef enum {
+@class PTYSession;
+
+typedef NS_ENUM(NSInteger, SplitSessionHalf) {
     kNoHalf,
     kNorthHalf,
     kSouthHalf,
     kEastHalf,
     kWestHalf,
     kFullPane
-} SplitSessionHalf;
+};
+
+typedef NS_ENUM(NSInteger, SplitSelectionViewMode) {
+    // Clicking cancels
+    SplitSelectionViewModeSourceMove,
+    SplitSelectionViewModeSourceSwap,
+
+    // Clicking moves/swaps
+    SplitSelectionViewModeTargetMove,
+    SplitSelectionViewModeTargetSwap,
+
+    // Clicking selects
+    SplitSelectionViewModeInspect,
+    SplitSelectionViewModeSelect
+};
 
 @class PTYSession;
 
-@protocol SplitSelectionViewDelegate
+@protocol SplitSelectionViewDelegate <NSObject>
 
 // dest will be null when canceling.
-- (void)didSelectDestinationSession:(PTYSession *)dest
+- (void)didSelectDestinationSession:(PTYSession *)session
                                half:(SplitSessionHalf)half;
 @end
 
-@interface SplitSelectionView : NSView {
-    BOOL cancelOnly_;
-    SplitSessionHalf half_;
-    NSTrackingArea *trackingArea_;
-    PTYSession *session_;  // weak
-    id<SplitSelectionViewDelegate> delegate_;  // weak
-}
+@interface SplitSelectionView : NSView
+@property (nonatomic, readonly) SplitSelectionViewMode mode;
 
-@property (nonatomic, assign) BOOL cancelOnly;
-
-// a "cancelOnly" pane can't be a destination and clicking on it cancels the
-// operation.
-//
 // frame is the frame fo the parent view.
 // session is the session we overlay.
 // the delegate gets called when a selection is made.
-- (id)initAsCancelOnly:(BOOL)cancelOnly
-             withFrame:(NSRect)frame
-           withSession:(PTYSession *)session
-              delegate:(id<SplitSelectionViewDelegate>)delegate
-                  move:(BOOL)move;
+- (instancetype)initWithMode:(SplitSelectionViewMode)mode
+                   withFrame:(NSRect)frame
+                     session:(PTYSession *)session
+                    delegate:(id<SplitSelectionViewDelegate>)delegate;
 
 // Update the selected half for a drag at the given point
 - (void)updateAtPoint:(NSPoint)point;

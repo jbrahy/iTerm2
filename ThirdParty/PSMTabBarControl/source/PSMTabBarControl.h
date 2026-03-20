@@ -7,7 +7,12 @@
 //
 
 #import <Cocoa/Cocoa.h>
+
+#import "PSMCachedTitle.h"
 #import "PSMProgressIndicator.h"
+
+// Set to 1 to enable drag performance debugging (timestamp overlay and NSLog statements)
+#define PSM_DEBUG_DRAG_PERFORMANCE 0
 
 extern NSString *const kPSMModifierChangedNotification;
 extern NSString *const kPSMTabModifierKey;  // Key for user info dict in modifier changed notification
@@ -15,11 +20,8 @@ extern NSString *const kPSMTabModifierKey;  // Key for user info dict in modifie
 extern NSString *const PSMTabDragDidEndNotification;
 extern NSString *const PSMTabDragDidBeginNotification;
 
-extern const CGFloat kPSMTabBarControlHeight;
-
 // internal cell border
 extern const CGFloat kSPMTabBarCellInternalXMargin;
-extern const CGFloat kSPMTabBarCellInternalYMargin;
 
 // padding between objects
 extern const CGFloat kPSMTabBarCellPadding;
@@ -29,6 +31,8 @@ extern const CGFloat kPSMMinimumTitleWidth;
 extern const CGFloat kPSMTabBarIndicatorWidth;
 extern const CGFloat kPSMTabBarIconWidth;
 extern const CGFloat kPSMHideAnimationSteps;
+extern const CGSize PSMTabBarGraphicSize;
+extern const CGFloat PSMTabBarGraphicMargin;
 
 // Value used in _currentStep to indicate that resizing operation is not in progress
 extern const NSInteger kPSMIsNotBeingResized;
@@ -36,11 +40,33 @@ extern const NSInteger kPSMIsNotBeingResized;
 // Value used in _currentStep when a resizing operation has just been started
 extern const NSInteger kPSMStartResizeAnimation;
 
-@class PSMOverflowPopUpButton;
 @class PSMRolloverButton;
 @class PSMTabBarCell;
 @class PSMTabBarControl;
 @protocol PSMTabStyle;
+
+typedef NSString *PSMTabBarControlOptionKey NS_EXTENSIBLE_STRING_ENUM;
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionColoredSelectedTabOutlineStrength;  // NSNumber in 0-3
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalStyleBackgroundColorDifference;  // Number in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalBackgroundAlphaValue;  // Number in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalTextLegibilityAdjustment;  // Number >= 0
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionColoredMinimalOutlineStrength;  // Number in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionColoredUnselectedTabTextProminence;  // NSNumber in 0-0.5
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionDimmingAmount;  // Double in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalStyleTreatLeftInsetAsPartOfFirstTab;  // Boolean
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimumSpaceForLabel;  // NSNumber CFGloat points
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionHighVisibility;  // NSNumber boolean
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionColoredDrawBottomLineForHorizontalTabBar;  // NSNumber boolean
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionFontSizeOverride;  // NSNumber double
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalSelectedTabUnderlineProminence;  // NSNumber double in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionDragEdgeHeight;  // NSNumber CGFloat
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionAttachedToTitleBar;  // NSNumber bool, 10.16+
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionHTMLTabTitles;  // NSNumber bool
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionMinimalNonSelectedColoredTabAlpha;  // NSNumber CGFloat in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionTextColor;  // NSColor
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionLightModeInactiveTabDarkness;  // NSNumber in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionDarkModeInactiveTabDarkness;  // NSNumber in 0-1
+extern PSMTabBarControlOptionKey PSMTabBarControlOptionPUAFontProvider;  // id<PSMPUAFontProvider> for Private Use Area characters
 
 // Tab views controlled by the tab bar may expect this protocol to be conformed to by their delegate.
 @protocol PSMTabViewDelegate<NSTabViewDelegate>
@@ -62,6 +88,7 @@ extern const NSInteger kPSMStartResizeAnimation;
 - (void)setIcon:(NSImage *)icon;
 - (int)objectCount;
 - (void)setObjectCount:(int)objectCount;
+- (NSImage *)psmTabGraphic;
 @end
 
 @protocol PSMTabBarControlDelegate<NSTabViewDelegate>
@@ -85,14 +112,15 @@ extern const NSInteger kPSMStartResizeAnimation;
 
 //Drag and drop methods
 - (BOOL)tabView:(NSTabView *)aTabView shouldDragTabViewItem:(NSTabViewItem *)tabViewItem fromTabBar:(PSMTabBarControl *)tabBarControl;
-- (BOOL)tabView:(NSTabView *)aTabView shouldDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)tabBarControl;
+- (BOOL)tabView:(NSTabView *)aTabView shouldDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)tabBarControl moveSourceWindow:(BOOL *)moveSourceWindow;
 - (void)tabView:(NSTabView*)aTabView willDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)tabBarControl;
 - (void)tabView:(NSTabView*)aTabView didDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)tabBarControl;
 
 //Tear-off tabs methods
-- (NSImage *)tabView:(NSTabView *)aTabView imageForTabViewItem:(NSTabViewItem *)tabViewItem offset:(NSSize *)offset styleMask:(unsigned int *)styleMask;
+- (NSImage *)tabView:(NSTabView *)aTabView imageForTabViewItem:(NSTabViewItem *)tabViewItem styleMask:(NSWindowStyleMask *)styleMask;
 - (PSMTabBarControl *)tabView:(NSTabView *)aTabView newTabBarForDraggedTabViewItem:(NSTabViewItem *)tabViewItem atPoint:(NSPoint)point;
 - (void)tabView:(NSTabView *)aTabView closeWindowForLastTabViewItem:(NSTabViewItem *)tabViewItem;
+- (BOOL)tabViewDragShouldExitWindow:(NSTabView *)tabView;
 
 //Overflow menu validation
 - (BOOL)tabView:(NSTabView *)aTabView validateOverflowMenuItem:(NSMenuItem *)menuItem forTabViewItem:(NSTabViewItem *)tabViewItem;
@@ -119,15 +147,15 @@ extern const NSInteger kPSMStartResizeAnimation;
 - (void)tabViewDoubleClickTabBar:(NSTabView *)tabView;
 - (void)setModifier:(int)mask;
 - (void)fillPath:(NSBezierPath*)path;
-- (void)closeTab:(id)identifier;
+- (void)tabView:(NSTabView *)tabView closeTab:(id)identifier button:(int)button;
 - (NSTabViewItem *)tabView:(NSTabView *)tabView unknownObjectWasDropped:(id <NSDraggingInfo>)sender;
+- (id)tabView:(PSMTabBarControl *)tabView valueOfOption:(PSMTabBarControlOptionKey)option;
+- (void)tabViewDidClickAddTabButton:(PSMTabBarControl *)tabView;
+- (BOOL)tabViewShouldDragWindow:(NSTabView *)tabView event:(NSEvent *)event;
+- (BOOL)tabViewShouldAllowDragOnAddTabButton:(NSTabView *)tabView;
+- (CGFloat)tabViewDesiredTabBarHeight:(NSTabView *)tabView;
 
 @end
-
-typedef enum {
-    PSMTabBarHorizontalOrientation,
-    PSMTabBarVerticalOrientation
-} PSMTabBarOrientation;
 
 enum {
     PSMTab_SelectedMask = 1 << 1,
@@ -139,7 +167,7 @@ enum {
     PSMTab_PositionSingleMask = 1 << 7
 };
 
-enum {
+typedef NS_ENUM(int, PSMTabPosition) {
     PSMTab_TopTab = 0,
     PSMTab_BottomTab = 1,
     PSMTab_LeftTab = 2,
@@ -149,6 +177,7 @@ enum {
 // the tabbed browsing interface of many popular browsers.
 @interface PSMTabBarControl : NSControl<
   NSDraggingSource,
+  NSAccessibilityGroup,
   PSMProgressIndicatorDelegate,
   PSMTabViewDelegate>
 
@@ -161,21 +190,31 @@ enum {
 @property(nonatomic, assign) int cellMinWidth;
 @property(nonatomic, assign) int cellMaxWidth;
 @property(nonatomic, assign) int cellOptimumWidth;
+@property(nonatomic, assign) int pinnedTabWidth;
 @property(nonatomic, assign) BOOL sizeCellsToFit;
+@property(nonatomic, assign) BOOL stretchCellsToFit;
 @property(nonatomic, assign) BOOL useOverflowMenu;
 @property(nonatomic, assign) BOOL allowsBackgroundTabClosing;
 @property(nonatomic, assign) BOOL allowsResizing;
 @property(nonatomic, assign) BOOL selectsTabsOnMouseDown;
 @property(nonatomic, assign) BOOL automaticallyAnimates;
 @property(nonatomic, assign) int tabLocation;
+@property(nonatomic, assign) int minimumTabDragDistance;
+@property(nonatomic, readonly) BOOL lainOutWithOverflow;
+
+// If off (the default) always ellipsize the ends of tab titles that don't fit.
+// Of on, ellipsize the start if more tabs share a prefix than a suffix.
+@property(nonatomic, assign) BOOL smartTruncation;
 
 @property(nonatomic, retain) IBOutlet NSTabView *tabView;
 @property(nonatomic, assign) id<PSMTabBarControlDelegate> delegate;
 @property(nonatomic, retain) id partnerView;
-@property(nonatomic, readonly) PSMOverflowPopUpButton *overflowPopUpButton;
+@property(nonatomic, readonly) NSButton *overflowPopUpButton;
+@property(nonatomic, assign) BOOL ignoreTrailingParentheticalsForSmartTruncation;
 
 // control characteristics
 + (NSBundle *)bundle;
++ (BOOL)isAnyDragInProgress;
 
 - (void)changeIdentifier:(id)newIdentifier atIndex:(int)theIndex;
 - (void)moveTabAtIndex:(NSInteger)i1 toIndex:(NSInteger)i2;
@@ -195,10 +234,17 @@ enum {
 - (void)bindPropertiesForCell:(PSMTabBarCell *)cell andTabViewItem:(NSTabViewItem *)item;
 - (void)removeTabForCell:(PSMTabBarCell *)cell;
 
-// iTerm add-ons
+#pragma mark - iTerm add-ons
+
+// Internal inset. Ensures nothing but background is drawn in this are.
+@property(nonatomic, assign) NSEdgeInsets insets;
+@property(nonatomic) CGFloat height;
+
 - (void)setTabColor:(NSColor *)aColor forTabViewItem:(NSTabViewItem *) tabViewItem;
 - (NSColor*)tabColorForTabViewItem:(NSTabViewItem*)tabViewItem;
-- (void)setModifier:(int)mask;
+- (void)setIsPinned:(BOOL)pinned forTabViewItem:(NSTabViewItem *)tabViewItem;
+- (BOOL)isPinnedForTabViewItem:(NSTabViewItem *)tabViewItem;
+- (void)setModifier:(NSUInteger)mask;
 - (NSString*)_modifierString;
 - (void)fillPath:(NSBezierPath*)path;
 - (NSTabViewItem *)tabView:(NSTabView *)tabView unknownObjectWasDropped:(id <NSDraggingInfo>)sender;
@@ -208,9 +254,29 @@ enum {
 - (void)initializeStateForCell:(PSMTabBarCell *)cell;
 
 - (void)setIsProcessing:(BOOL)isProcessing forTabWithIdentifier:(id)identifier;
+- (void)setProgress:(PSMProgress)progress forTabWithIdentifier:(id)identifier;
 - (void)setIcon:(NSImage *)icon forTabWithIdentifier:(id)identifier;
 - (void)setObjectCount:(NSInteger)objectCount forTabWithIdentifier:(id)identifier;
+- (void)graphicDidChangeForTabWithIdentifier:(id)identifier;
 
 - (void)setTabsHaveCloseButtons:(BOOL)tabsHaveCloseButtons;
 
+// Safely remove a cell.
+- (void)removeCell:(PSMTabBarCell *)cell;
+
+// Is there anything useful at this point or just background? Useful if you can
+// drag the window by dragging the background.
+- (BOOL)wantsMouseDownAtPoint:(NSPoint)point;
+- (void)moveTabAtIndex:(NSInteger)sourceIndex
+              toTabBar:(PSMTabBarControl *)destinationTabBar
+               atIndex:(NSInteger)destinationIndex;
+- (void)backgroundColorWillChange;
+- (id)cellForPoint:(NSPoint)point
+         cellFrame:(NSRectPointer)outFrame;
+- (void)dragWillExitTabBar;
+- (void)dragDidFinish;
+
 @end
+
+BOOL PSMShouldExtendTransparencyIntoMinimalTabBar(void);
+

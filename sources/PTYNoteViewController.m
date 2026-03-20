@@ -8,22 +8,41 @@
 
 #import "PTYNoteViewController.h"
 #import "IntervalTree.h"
+#import "NSView+iTerm.h"
 #import "PTYNoteView.h"
 
-static NSString *const kNoteViewTextKey = @"Text";
+static NSInteger gVisibleNotes;
 
 NSString * const PTYNoteViewControllerShouldUpdatePosition = @"PTYNoteViewControllerShouldUpdatePosition";
+NSString *const iTermAnnotationVisibilityDidChange = @"iTermAnnotationVisibilityDidChange";
 
 static const CGFloat kBottomPadding = 3;
 
-@interface PTYNoteViewController ()
-@property(nonatomic, retain) NSTextView *textView;
-@property(nonatomic, retain) NSScrollView *scrollView;
+static void PTYNoteViewControllerIncrementVisibleCount(NSInteger delta) {
+    gVisibleNotes += delta;
+    if ((delta > 0 && gVisibleNotes == 1) ||
+        (delta < 0 && gVisibleNotes == 0)) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:iTermAnnotationVisibilityDidChange object:nil];
+    }
+}
+
+@interface PTYNoteViewController () <
+    NSTextViewDelegate,
+    PTYNoteViewDelegate>
+
+@property(nonatomic, strong) NSTextView *textView;
+@property(nonatomic, strong) NSScrollView *scrollView;
 @property(nonatomic, assign) BOOL watchForUpdate;
 @end
 
 @implementation PTYNoteViewController {
     NSTimeInterval highlightStartTime_;
+    PTYNoteView *noteView_;
+    NSTextView *textView_;
+    NSScrollView *scrollView_;
+    NSPoint anchor_;
+    BOOL watchForUpdate_;
+    BOOL hidden_;
 }
 
 @synthesize noteView = noteView_;
@@ -31,43 +50,45 @@ static const CGFloat kBottomPadding = 3;
 @synthesize scrollView = scrollView_;
 @synthesize anchor = anchor_;
 @synthesize watchForUpdate = watchForUpdate_;
-@synthesize entry;
-@synthesize delegate;
 
-- (instancetype)initWithDictionary:(NSDictionary *)dict {
++ (BOOL)anyNoteVisible {
+    return gVisibleNotes > 0;
+}
+
+- (instancetype)initWithAnnotation:(id<PTYAnnotationReading>)annotation {
     self = [super init];
     if (self) {
-        self.string = dict[kNoteViewTextKey];
+        _annotation = annotation;
+        PTYNoteViewControllerIncrementVisibleCount(1);
+        // NOTE: This must be the last thing done since it could cause a delegate method to be called.
+        _annotation.delegate = self;
     }
     return self;
 }
 
 - (void)dealloc {
+    if (!hidden_) {
+        PTYNoteViewControllerIncrementVisibleCount(-1);
+    }
     [noteView_ removeFromSuperview];
-    noteView_.delegate = nil;
-    [noteView_ release];
-    [textView_ release];
-    [scrollView_ release];
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [super dealloc];
 }
 
 - (void)setNoteView:(PTYNoteView *)noteView {
-    [noteView_ autorelease];
-    noteView_ = [noteView retain];
+    noteView_ = noteView;
     [self setView:noteView];
+    [self updateTextViewString];
 }
 
 - (void)loadView {
     const CGFloat kWidth = 300;
     const CGFloat kHeight = 10;
-    self.noteView = [[[PTYNoteView alloc] initWithFrame:NSMakeRect(0, 0, kWidth, kHeight)] autorelease];
+    self.noteView = [[PTYNoteView alloc] initWithFrame:NSMakeRect(0, 0, kWidth, kHeight)];
     self.noteView.autoresizesSubviews = YES;
     self.noteView.delegate = self;
-    NSShadow *shadow = [[[NSShadow alloc] init] autorelease];
-    shadow.shadowColor = [[NSColor blackColor] colorWithAlphaComponent:0.5];
-    shadow.shadowOffset = NSMakeSize(1, -1);
-    shadow.shadowBlurRadius = 1.0;
+    NSShadow *shadow = [[NSShadow alloc] init];
+    shadow.shadowColor = [[NSColor blackColor] colorWithAlphaComponent:0.15];
+    shadow.shadowOffset = NSMakeSize(0, -2);
+    shadow.shadowBlurRadius = 8.0;
     self.noteView.wantsLayer = YES;
     self.noteView.shadow = shadow;
 
@@ -75,17 +96,17 @@ static const CGFloat kBottomPadding = 3;
                               3,
                               kWidth,
                               kHeight);
-    self.scrollView = [[[NSScrollView alloc] initWithFrame:frame] autorelease];
+    self.scrollView = [[NSScrollView alloc] initWithFrame:frame];
+    scrollView_.scrollerStyle = NSScrollerStyleOverlay;
     scrollView_.drawsBackground = NO;
     scrollView_.hasVerticalScroller = YES;
     scrollView_.hasHorizontalScroller = NO;
     scrollView_.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    self.textView = [[[NSTextView alloc] initWithFrame:NSMakeRect(0,
+    self.textView = [[NSTextView alloc] initWithFrame:NSMakeRect(0,
                                                                   0,
                                                                   scrollView_.contentSize.width,
-                                                                  scrollView_.contentSize.height)]
-                     autorelease];
+                                                                  scrollView_.contentSize.height)];
     textView_.allowsUndo = YES;
     textView_.minSize = scrollView_.frame.size;
     textView_.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
@@ -102,13 +123,14 @@ static const CGFloat kBottomPadding = 3;
     // at the bottom.
     NSRect wrapperFrame = scrollView_.frame;
     wrapperFrame.size.height += kBottomPadding;
-    NSView *wrapper = [[[NSView alloc] initWithFrame:wrapperFrame] autorelease];
+    NSView *wrapper = [[NSView alloc] initWithFrame:wrapperFrame];
     wrapper.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     wrapper.autoresizesSubviews = YES;
     [wrapper addSubview:scrollView_];
 
     noteView_.contentView = wrapper;
     [self sizeToFit];
+    [self updateTextViewString];
 }
 
 - (void)beginEditing {
@@ -119,12 +141,31 @@ static const CGFloat kBottomPadding = 3;
     anchor_ = anchor;
 
     NSRect superViewFrame = noteView_.superview.frame;
-    CGFloat xOffset = 0;
-    if (anchor_.x + noteView_.frame.size.width > superViewFrame.size.width) {
-        xOffset = anchor_.x + noteView_.frame.size.width - superViewFrame.size.width;
-    }
-    noteView_.tipEdge = kPTYNoteViewTipEdgeTop;
     NSSize size = [noteView_ sizeThatFitsContentView];
+
+    // Position the bubble so the pointer is roughly centered, making it more vertical.
+    // xOffset is how far the pointer tip is from the left edge of the bubble.
+    const CGFloat pointerInset = 40;
+    CGFloat xOffset;
+
+    // Ideal bubble position: pointer at pointerInset from left edge.
+    CGFloat idealBubbleX = anchor_.x - pointerInset;
+
+    if (idealBubbleX < 0) {
+        // Bubble would go off left edge - align to left edge.
+        xOffset = anchor_.x;
+    } else if (idealBubbleX + size.width > superViewFrame.size.width) {
+        // Bubble would go off right edge - align to right edge.
+        xOffset = anchor_.x - (superViewFrame.size.width - size.width);
+    } else {
+        // Bubble fits with ideal positioning.
+        xOffset = pointerInset;
+    }
+
+    // Clamp xOffset to valid range (pointer must be within bubble).
+    xOffset = MAX(0, MIN(xOffset, size.width));
+
+    noteView_.tipEdge = kPTYNoteViewTipEdgeTop;
     noteView_.point = NSMakePoint(xOffset, 0);
     noteView_.frame = NSMakeRect(anchor_.x - xOffset,
                                  anchor_.y,
@@ -163,9 +204,12 @@ static const CGFloat kBottomPadding = 3;
     }
 }
 
-- (void)finalizeToggleOfHide {
-    [noteView_ setHidden:hidden_];
-    noteView_.alphaValue = hidden_ ? 0 : 1;
+- (void)finalizeToggleOfHide:(BOOL)newValue {
+    [noteView_ setHidden:newValue];
+    noteView_.alphaValue = newValue ? 0 : 1;
+    if (newValue) {
+        PTYNoteViewControllerIncrementVisibleCount(-1);
+    }
 }
 
 - (void)setNoteHidden:(BOOL)hidden {
@@ -174,19 +218,26 @@ static const CGFloat kBottomPadding = 3;
     }
     hidden_ = hidden;
     [noteView_ setHidden:NO];
-    [noteView_.animator setAlphaValue:(hidden ? 0 : 1)];
-    [self performSelector:@selector(finalizeToggleOfHide)
-               withObject:nil
-               afterDelay:[[NSAnimationContext currentContext] duration]];
+    [NSView animateWithDuration:0.25
+                     animations:^{
+                         [noteView_.animator setAlphaValue:(hidden ? 0 : 1)];
+                     }
+                     completion:^(BOOL finished) {
+                         [self finalizeToggleOfHide:hidden];
+                     }];
+    if (!hidden) {
+        PTYNoteViewControllerIncrementVisibleCount(1);
+    }
+    [self.delegate noteVisibilityDidChange:self];
 }
 
 - (BOOL)isEmpty {
     return [[textView_.string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] == 0;
 }
 
-- (void)setString:(NSString *)string {
+- (void)updateTextViewString {
     [self view];  // Ensure textView exists.
-    textView_.string = string;
+    textView_.string = _annotation.stringValue;
 }
 
 - (BOOL)isNoteHidden {
@@ -207,7 +258,8 @@ static const CGFloat kBottomPadding = 3;
     anchor_ = point;
 }
 
-- (void)sizeToFit {
+- (NSSize)textViewFittingSize {
+    [self view];
     NSLayoutManager *layoutManager = textView_.layoutManager;
     NSTextContainer *textContainer = textView_.textContainer;
     [layoutManager ensureLayoutForTextContainer:textContainer];
@@ -215,24 +267,37 @@ static const CGFloat kBottomPadding = 3;
 
     const CGFloat kMinTextViewWidth = 250;
     usedRect.size.width = MAX(usedRect.size.width, kMinTextViewWidth);
+    return usedRect.size;
+}
 
-    NSSize scrollViewSize = [NSScrollView frameSizeForContentSize:usedRect.size
-                                          horizontalScrollerClass:[[scrollView_ horizontalScroller] class]
-                                            verticalScrollerClass:[[scrollView_ verticalScroller] class]
-                                                       borderType:NSNoBorder
-                                                      controlSize:NSRegularControlSize
-                                                    scrollerStyle:[scrollView_ scrollerStyle]];
+- (NSSize)fittingSize {
+    return [self sizeForTextViewSize:[self textViewFittingSize]];
+}
+
+- (NSSize)sizeForTextViewSize:(NSSize)textViewSize {
+    NSSize size = [NSScrollView frameSizeForContentSize:textViewSize
+                                horizontalScrollerClass:[[scrollView_ horizontalScroller] class]
+                                  verticalScrollerClass:[[scrollView_ verticalScroller] class]
+                                             borderType:NSNoBorder
+                                            controlSize:NSControlSizeRegular
+                                          scrollerStyle:[scrollView_ scrollerStyle]];
+    size.height += kBottomPadding;
+    return size;
+}
+
+- (void)sizeToFit {
+    const NSSize textViewFittingSize = [self textViewFittingSize];
+    const NSSize scrollViewSize = [self sizeForTextViewSize:textViewFittingSize];
     NSRect theFrame = NSMakeRect(NSMinX(scrollView_.frame),
                                  NSMinY(scrollView_.frame),
                                  scrollViewSize.width,
                                  scrollViewSize.height);
 
     NSView *wrapper = scrollView_.superview;
-    theFrame.size.height += kBottomPadding;
     wrapper.frame = theFrame;
 
-    textView_.minSize = usedRect.size;
-    textView_.frame = NSMakeRect(0, 0, usedRect.size.width, usedRect.size.height);
+    textView_.minSize = textViewFittingSize;
+    textView_.frame = NSMakeRect(0, 0, textViewFittingSize.width, textViewFittingSize.height);
 
     [self setAnchor:anchor_];
 }
@@ -253,8 +318,19 @@ static const CGFloat kBottomPadding = 3;
 
 #pragma mark - NSControlTextEditingDelegate
 
+- (void)textDidChange:(NSNotification *)notification {
+    [self.delegate note:self setAnnotation:_annotation stringValue:textView_.string];
+    if (!noteView_.heightChangedManually) {
+        const NSSize fittingSize = [self fittingSize];
+        if (fittingSize.height > scrollView_.superview.frame.size.height) {
+            [self sizeToFit];
+        }
+    }
+}
+
 - (BOOL)textView:(NSTextView *)aTextView doCommandBySelector:(SEL)aSelector {
     if (aSelector == @selector(cancelOperation:)) {
+        [self.delegate note:self setAnnotation:_annotation stringValue:textView_.string];
         [self.delegate noteDidEndEditing:self];
         return YES;
     }
@@ -270,12 +346,12 @@ static const CGFloat kBottomPadding = 3;
     const NSTimeInterval duration = 0.75;
     // Alpha counts from 0 to 1.
     float alpha = 1.0 - MIN(MAX(0, (duration - elapsed) / duration), 1);
-    
+
     // Square alpha so it spends more time in the highlighted end of the range.
     alpha = alpha * alpha;
-    
+
     NSColor *defaultBg = [self.noteView defaultBackgroundColor];
-    CGFloat highlightComponents[] = { 0.9, 0.8, 0 };
+    CGFloat highlightComponents[] = { 0.85, 0.92, 1.0 };
     CGFloat components[3] = {
         [defaultBg redComponent] * alpha + (1 - alpha) * highlightComponents[0],
         [defaultBg greenComponent] * alpha + (1 - alpha) * highlightComponents[1],
@@ -294,10 +370,18 @@ static const CGFloat kBottomPadding = 3;
     [self.noteView setNeedsDisplay:YES];
 }
 
-#pragma mark - IntervalTreeObject
+#pragma mark - PTYAnnotationDelegate
 
-- (NSDictionary *)dictionaryValue {
-    return @{ kNoteViewTextKey: textView_.string ?: @"" };
+- (void)annotationDidRequestHide:(id<PTYAnnotationReading>)annotation {
+    [self setNoteHidden:YES];
+}
+
+- (void)annotationStringDidChange:(id<PTYAnnotationReading>)annotation {
+    [self updateTextViewString];
+}
+
+- (void)annotationWillBeRemoved:(id<PTYAnnotationReading>)annotation {
+    [self.delegate noteWillBeRemoved:self];
 }
 
 @end

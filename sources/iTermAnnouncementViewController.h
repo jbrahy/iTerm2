@@ -11,7 +11,7 @@
 
 @class iTermAnnouncementViewController;
 
-@protocol iTermAnnouncementDelegate
+@protocol iTermAnnouncementDelegate <NSObject>
 - (void)announcementWillDismiss:(iTermAnnouncementViewController *)announcement;
 @end
 
@@ -19,11 +19,20 @@
 
 @property(nonatomic, assign) id<iTermAnnouncementDelegate> delegate;
 @property(nonatomic, copy) void (^completion)(int);
+@property(nonatomic) BOOL isMarkdown;
+
+// NOTE: Once this is set to YES it can never be changed.
+@property(nonatomic, assign) BOOL dismissOnKeyDown;
 
 + (instancetype)announcementWithTitle:(NSString *)title
                                 style:(iTermAnnouncementViewStyle)style
                           withActions:(NSArray *)actions
                            completion:(void (^)(int))completion;
+
++ (instancetype)announcementWithMarkdownTitle:(NSString *)title
+                                        style:(iTermAnnouncementViewStyle)style
+                                  withActions:(NSArray *)actions
+                                   completion:(void (^)(int))completion;
 
 - (void)dismiss;
 
@@ -35,5 +44,7 @@
 
 // Indicates if it has timed out.
 - (BOOL)shouldBecomeVisible;
+
+- (BOOL)handleKeyDown:(NSEvent *)event;
 
 @end

@@ -44,50 +44,33 @@ typedef enum {
     DVRFrameTypeDiffFrame
 } DVRFrameType;
 
+@protocol DVREncodable<NSObject>
+- (NSData *)dvrEncodableData;
+@end
+
 @interface DVRBuffer : NSObject
-{
-@private
-    // Points to start of large circular buffer.
-    char* store_;
 
-    // Points into store_ after -[reserve:] is called.
-    char* scratch_;
+// Returns first/last used keys.
+@property(nonatomic, readonly) long long firstKey;
+@property(nonatomic, readonly) long long lastKey;
 
-    // Total size of storage in bytes.
-    long long capacity_;
+// Total size of storage.
+@property(nonatomic, readonly) long long capacity;
 
-    // Maps a frame key number to DVRIndexEntry*.
-    NSMutableDictionary* index_;
-    
-    // First key in index.
-    long long firstKey_;
+// Are there no frames?
+@property(nonatomic, readonly, getter=isEmpty) BOOL empty;
+@property(nonatomic, readonly) NSDictionary *dictionaryValue;
 
-    // Next key number to add to index.
-    long long nextKey_;
+@property(nonatomic, readonly) int migrateFromVersion;
 
-    // begin may be before or after end. If "-" is an allocated byte and "." is
-    // a free byte then you can have one of two cases:
-    //
-    // begin------end.....
-    // ----end....begin---
-
-    // Beginning of circular buffer's used region.
-    long long begin_;
-
-    // Non-inclusive end of circular buffer's used regino.
-    long long end_;
-
-    // this must always equal index_.
-    id sanityCheck;  // TODO(georgen): remove this after the source of corruption of index_ is found
-}
-
-- (id)initWithBufferCapacity:(long long)capacity;
-- (void)dealloc;
+- (instancetype)initWithBufferCapacity:(long long)capacity;
 
 // Reserve a chunk of memory. Returns true if blocks had to be freed to make room.
 // You can get a pointer to the reserved memory with -[scratch].
 - (BOOL)reserve:(long long)length;
 - (char*)scratch;
+
+- (ptrdiff_t)offsetOfPointer:(char *)pointer;
 
 // Allocate a block. Returns the assigned key. You must have called -[reserve] first.
 // length may less than reserved amount.
@@ -102,17 +85,11 @@ typedef enum {
 // Returns true if there's enough free space without deallocating a block.
 - (BOOL)hasSpaceAvailable:(long long)length;
 
-// Returns first/last used keys.
-- (long long)firstKey;
-- (long long)lastKey;
-
 // Look up an index entry by key.
 - (DVRIndexEntry*)entryForKey:(long long)key;
+- (BOOL)loadFromDictionary:(NSDictionary *)dict version:(int)version;
+- (DVRIndexEntry *)firstEntryWithTimestampAfter:(long long)timestamp;
+- (NSData *)dataAtOffset:(ptrdiff_t)offset length:(size_t)length;
 
-// Total size of storage.
-- (long long)capacity;
-
-// Are there no frames?
-- (BOOL)isEmpty;
 @end
 

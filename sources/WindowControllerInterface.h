@@ -1,23 +1,25 @@
 // Defines a protocol shared by PseudoTerminal and FakeWindow.
 
 #import <Cocoa/Cocoa.h>
+#import "ITAddressBookMgr.h"
+#import "iTermBroadcastInputHelper.h"
 #import "ProfileModel.h"
 #import "PTYTabDelegate.h"
+#import "PTYWindow.h"
 
-@class Popup;
+@class iTermPopupWindowController;
+@class iTermRestorableSession;
+@class iTermSwiftyStringGraph;
 @class PSMTabBarControl;
 @class PTYSession;
 @class PTYTab;
 @class PTYTabView;
 @class TmuxController;
-@class VT100RemoteHost;
+@protocol VT100RemoteHostReading;
+@class iTermPromise;
+@protocol iTermPromiseSeal;
 
-typedef enum {
-    BROADCAST_OFF,
-    BROADCAST_TO_ALL_PANES,
-    BROADCAST_TO_ALL_TABS,
-    BROADCAST_CUSTOM
-} BroadcastMode;
+@class iTermRestorableSession;
 
 // This is a very basic interface, which is sufficient for simulating a window
 // controller for instant replay.
@@ -26,7 +28,7 @@ typedef enum {
 // Called by VT100Screen when it wants to resize a window for a
 // session-initiated resize. It resizes the session, then the window, then all
 // sessions to fit the new window size.
-- (void)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height;
+- (BOOL)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height;
 
 // Is the window in traditional fullscreen mode?
 - (BOOL)fullScreen;
@@ -34,15 +36,22 @@ typedef enum {
 // Returns true if the window is fullscreen in either Lion-style or
 // pre-Lion-style fullscreen.
 - (BOOL)anyFullScreen;
+- (BOOL)movesWhenDraggedOntoSelf;
 
 // Close a session
 - (void)closeSession:(PTYSession*)aSession;
+
+// Close a session but don't kill the underlying window pane if it's a tmux session.
+- (void)softCloseSession:(PTYSession *)aSession;
 
 // Select the tab to the right of the foreground tab.
 - (void)nextTab:(id)sender;
 
 // Select the tab to the left of the foreground tab.
 - (void)previousTab:(id)sender;
+
+// Add a tab with the same panes and profiles.
+- (void)createDuplicateOfTab:(PTYTab *)theTab;
 
 // Set background color for tab chrome.
 - (void)updateTabColors;
@@ -52,9 +61,6 @@ typedef enum {
 
 // Disable blur for window.
 - (void)disableBlur;
-
-// Is the window title transient?
-- (BOOL)tempTitle;
 
 // Force the window size to change to be just large enough to fit this session.
 - (void)fitWindowToTab:(PTYTab*)tab;
@@ -67,9 +73,6 @@ typedef enum {
 
 // Set the window title to the name of the current session.
 - (void)setWindowTitle;
-
-// Set the window title to non-transient.
-- (void)resetTempTitle;
 
 // Return the foreground tab
 - (PTYTab*)currentTab;
@@ -102,6 +105,10 @@ typedef enum {
 // Is the toolbelt visible for this window?
 @property(nonatomic, readonly) BOOL shouldShowToolbelt;
 @property(nonatomic, readonly) NSArray *tabs;
+@property(nonatomic, readonly) BOOL windowIsResizing;
+@property(nonatomic, readonly) BOOL closing;
+@property(nonatomic, strong) iTermPromise *fullScreenPromise;
+@property(nonatomic, strong) id<iTermPromiseSeal> fullScreenEnteredSeal;
 
 #pragma mark - Basics
 
@@ -110,6 +117,7 @@ typedef enum {
 
 // Underlying window
 - (NSWindow *)window;
+- (iTermTerminalWindow *)ptyWindow;
 
 // Unique identifier
 - (NSString *)terminalGuid;
@@ -134,7 +142,7 @@ typedef enum {
 - (BOOL)useTransparency;
 
 // Increment the badge count, or set it to 1 if there is none.
-- (void)incrementBadge;
+- (BOOL)incrementBadge;
 
 // For scripting.
 - (NSScriptObjectSpecifier *)objectSpecifier;
@@ -144,12 +152,14 @@ typedef enum {
 
 // The current mode for broadcasting of input.
 - (BroadcastMode)broadcastMode;
+- (void)setBroadcastMode:(BroadcastMode)mode;
+- (NSArray<PTYSession *> *)broadcastSessions;
 
 // Returns true if the window is in 10.7-style fullscreen.
 - (BOOL)lionFullScreen;
 
 // Get the window type
-- (int)windowType;
+- (iTermWindowType)windowType;
 
 // Returns a new terminal at the given screen coordinate. The
 // "wasDraggedFromAnotherWindow_" flag is set on the returned window.
@@ -160,13 +170,27 @@ typedef enum {
 
 // Pop the current session out and move it into its own window.
 - (void)moveSessionToWindow:(id)sender;
+- (void)moveSessionToTab:(id)sender;
 
 // Show or hide this window's toolbelt.
 - (IBAction)toggleToolbeltVisibility:(id)sender;
 
-- (void)popupWillClose:(Popup *)popup;
+- (void)popupWillClose:(iTermPopupWindowController *)popup;
 
 - (void)toggleFullScreenMode:(id)sender;
+
+- (void)toggleFullScreenMode:(id)sender
+                  completion:(void (^)(BOOL))completion;
+
+// Is the window title transient?
+- (void)clearTransientTitle;
+- (BOOL)isShowingTransientTitle;
+
+- (void)currentSessionWordAtCursorDidBecome:(NSString *)word;
+
+- (void)storeWindowStateInRestorableSession:(iTermRestorableSession *)restorableSession;
+
+- (PTYSession *)syntheticSessionForSession:(PTYSession *)oldSession;
 
 #pragma mark - Tabs
 
@@ -176,6 +200,17 @@ typedef enum {
 // Move tabs within ordering.
 - (void)moveTabLeft:(id)sender;
 - (void)moveTabRight:(id)sender;
+
+// Increase and Decrease
+- (void)increaseHeight:(id)sender;
+- (void)decreaseHeight:(id)sender;
+- (void)increaseWidth:(id)sender;
+- (void)decreaseWidth:(id)sender;
+
+- (void)increaseHeightOfSession:(PTYSession *)session;
+- (void)decreaseHeightOfSession:(PTYSession *)session;
+- (void)increaseWidthOfSession:(PTYSession *)session;
+- (void)decreaseWidthOfSession:(PTYSession *)session;
 
 // If soft is true, don't kill tmux session. Otherwise is just like closeTab.
 - (void)closeTab:(PTYTab *)aTab soft:(BOOL)soft;
@@ -189,21 +224,22 @@ typedef enum {
 // Adds a tab to the end.
 - (void)appendTab:(PTYTab*)aTab;
 
+// Adds tab at end or next to current tab depending on settings.
+- (void)addTabAtAutomaticallyDeterminedLocation:(PTYTab *)tab;
+
 // Fit the window to exactly fit a tab of the given size. Returns true if the
 // window was resized.
 - (BOOL)fitWindowToTabSize:(NSSize)tabSize;
+- (void)lazyFitWindowToTabSize:(NSSize)tabSize cellSize:(NSSize)cellSize;
 
 // Return the index of a tab or NSNotFound.
-// This method is used, for example, in iTermExpose, where PTYTabs are shown
-// side by side, and one needs to determine which index it has, so it can be
-// selected when leaving iTerm expose.
 - (NSInteger)indexOfTab:(PTYTab*)aTab;
 
 // Insert a tab at a specified location.
 - (void)insertTab:(PTYTab*)aTab atIndex:(int)anIndex;
 
 // Add a session to the tab view.
-- (void)insertSession:(PTYSession *)aSession atIndex:(int)anIndex;
+- (PTYTab *)insertSession:(PTYSession *)aSession atIndex:(int)anIndex;
 
 // Resize window to be just large enough to fit the largest tab without
 // changing session sizes.
@@ -211,14 +247,23 @@ typedef enum {
 
 - (void)tabActiveSessionDidChange;
 
+// Returns the tab associated with a session.
+- (PTYTab *)tabForSession:(PTYSession *)session;
+
+- (void)tabTitleDidChange:(PTYTab *)tab;
+
+- (void)tabAddSwiftyStringsToGraph:(iTermSwiftyStringGraph *)graph;
+
+- (void)tabSessionDidChangeTransparency:(PTYTab *)tab;
+
 #pragma mark - Sessions
 
 // Set the session name. If theSessionName is nil then set it to the pathname
 // or "Finish" if it's closed.
 - (void)setName:(NSString *)theSessionName forSession:(PTYSession*)aSession;
 
-// Return the name of the foreground session.
-- (NSString *)currentSessionName;
+// Return the window title, minus it number, bell, etc.
+- (NSString *)undecoratedWindowTitle;
 
 // Show the pref panel for the current session, divorcing it from its profile.
 - (void)editSession:(PTYSession*)session makeKey:(BOOL)makeKey;
@@ -228,9 +273,6 @@ typedef enum {
 
 // Restart a session if the user agrees to a modal alert.
 - (void)restartSessionWithConfirmation:(PTYSession *)aSession;
-
-// Close a session but don't kill the underlying window pane if it's a tmux session.
-- (void)softCloseSession:(PTYSession *)aSession;
 
 // Update sessions' dimming status.
 - (void)setDimmingForSessions;
@@ -251,15 +293,29 @@ typedef enum {
 - (void)selectPaneUp:(id)sender;
 - (void)selectPaneDown:(id)sender;
 
+- (void)swapPaneLeft;
+- (void)swapPaneRight;
+- (void)swapPaneUp;
+- (void)swapPaneDown;
+
 // Enable or disable transparency support for a window.
 - (void)toggleUseTransparency:(id)sender;
+
+- (void)openPasswordManagerToAccountName:(NSString *)name inSession:(PTYSession *)session;
+- (void)openPasswordManagerToAccountName:(NSString *)name
+                               inSession:(PTYSession *)session
+                                 forUser:(BOOL)forUser
+                         didSendUserName:(void (^)(void))didSendUserName;
+
+- (void)tabDidClearScrollbackBufferInSession:(PTYSession *)session;
+- (void)rightExtraDidChange;
 
 #pragma mark - Instant replay
 
 // Begin instant replay on a session.
 - (void)replaySession:(PTYSession *)oldSession;
 
-// End instant replay, subbing in a live sesssion for the fake IR session.
+// End instant replay, subbing in a live session for the fake IR session.
 - (void)showLiveSession:(PTYSession*)liveSession
               inPlaceOf:(PTYSession*)replaySession;
 
@@ -267,7 +323,7 @@ typedef enum {
 - (BOOL)inInstantReplay;
 
 // Hide the IR bar and end instant replay.
-- (void)closeInstantReplay:(id)sender;
+- (BOOL)closeInstantReplay:(id)sender orTerminateSession:(BOOL)orTerminateSession;
 
 // Step forward/back in IR.
 - (void)irPrev:(id)sender;
@@ -282,13 +338,19 @@ typedef enum {
 #pragma mark - Broadcast
 
 // Indicates if a session participates in input broadcasting.
-- (BOOL)broadcastInputToSession:(PTYSession *)session;
+- (BOOL)broadcastInputToSession:(PTYSession *)session fromSessionWithGUID:(NSString *)sender;
+- (BOOL)sessionIsBroadcastSource:(PTYSession *)session;
 
 // Toggles broadcasting to a single session.
 - (void)toggleBroadcastingInputToSession:(PTYSession *)session;
 
 // Call writeTask: for each session's shell with the given data.
-- (void)sendInputToAllSessions:(NSData *)data;
+- (void)sendInputToAllSessions:(NSString *)string
+                      encoding:(NSStringEncoding)optionalEncoding
+                 forceEncoding:(BOOL)forceEncoding;
+- (void)broadcastScrollToEnd:(PTYSession *)sender;
+
+- (iTermRestorableSession *)restorableSessionForSession:(PTYSession *)session;
 
 #pragma mark - Tmux
 
@@ -304,7 +366,9 @@ typedef enum {
 
 // Fit the window to the tabs after a tmux layout change. A change is trivial
 // if views are resized but the view hierarchy is not changed.
-- (void)tmuxTabLayoutDidChange:(BOOL)nontrivialChange;
+- (void)tmuxTabLayoutDidChange:(BOOL)nontrivialChange
+                           tab:(PTYTab *)tab
+            variableWindowSize:(BOOL)variableWindowSize;
 
 // Returns an array of unique tmux controllers present in this window.
 - (NSArray *)uniqueTmuxControllers;
@@ -312,58 +376,71 @@ typedef enum {
 // Opens a new tmux tab. window gives the tmux window id. name gives the new
 // window title.
 - (void)loadTmuxLayout:(NSMutableDictionary *)parseTree
+         visibleLayout:(NSMutableDictionary *)visibleParseTree
                 window:(int)window
         tmuxController:(TmuxController *)tmuxController
                   name:(NSString *)name;
 
 #pragma mark - Splits
 
-// Create a new split. The new session uses the profile with |guid|.
-- (PTYSession *)splitVertically:(BOOL)isVertical withBookmarkGuid:(NSString*)guid;
-
-// Create a new split with a provided profile.
-- (PTYSession *)splitVertically:(BOOL)isVertical withProfile:(Profile *)profile;
-
-// Create a new split with a specified bookmark. |targetSession| is the session
+// Create a new split with a specified bookmark. `targetSession` is the session
 // to split.
-- (PTYSession *)splitVertically:(BOOL)isVertical
-                   withBookmark:(Profile*)theBookmark
-                  targetSession:(PTYSession*)targetSession;
+- (void)asyncSplitVertically:(BOOL)isVertical
+                      before:(BOOL)before
+                     profile:(Profile *)theBookmark
+               targetSession:(PTYSession *)targetSession
+                  completion:(void (^)(PTYSession *, BOOL ok))completion
+                       ready:(void (^)(PTYSession *, BOOL ok))ready;
 
 // Create a new split with the specified bookmark. The passed-in session is
 // inserted either before (left/above) or after (right/below) the target
-// session. If performSetup is set, then setupSession:title:withSize: is
+// session. If performSetup is set, then setupSession:withSize: is
 // called.
 - (void)splitVertically:(BOOL)isVertical
                  before:(BOOL)before
           addingSession:(PTYSession*)newSession
           targetSession:(PTYSession*)targetSession
            performSetup:(BOOL)performSetup;
-
 // Indicates if the current session can be split.
 - (BOOL)canSplitPaneVertically:(BOOL)isVertical withBookmark:(Profile*)theBookmark;
 
-// Indicates if this the hotkey window.
+// Indicates if this a hotkey window.
 - (BOOL)isHotKeyWindow;
 
-- (void)sessionHostDidChange:(PTYSession *)session to:(VT100RemoteHost *)host;
+// Is this a "floating" hotkey window? These sit in nonactivating panels with a high window level.
+- (BOOL)isFloatingHotKeyWindow;
+
+- (void)sessionHostDidChange:(PTYSession *)session to:(id<VT100RemoteHostReading>)host;
 
 #pragma mark - Command history
 
 // Remove the ACH window. It won't come back until showAutoCommandHistoryForSession is called.
 - (void)hideAutoCommandHistoryForSession:(PTYSession *)session;
 
+// Should updateAutoCommandHistoryForPrefix:inSession:popIfNeeded: be called?
+- (BOOL)wantsCommandHistoryUpdatesFromSession:(PTYSession *)session;
+- (BOOL)autoCommandHistoryEnabledForSession:(PTYSession *)session;
+
 // Set the current command prefix for a given session, updating the ACH window
 // if open. If it was shown with showAutoCommandHistoryForSession but then
 // taken offscreen because there were no entries, this may cause it to return
 // to visibility. It won't return to visibility if
 // hideAutoCommandHistoryForSession was called.
-- (void)updateAutoCommandHistoryForPrefix:(NSString *)prefix inSession:(PTYSession *)session;
+- (void)updateAutoCommandHistoryForPrefix:(NSString *)prefix inSession:(PTYSession *)session popIfNeeded:(BOOL)popIfNeeded;
 
 // Show the ACH window. Follow up with a call to updateAutoCommandHistoryForPrefix.
 - (void)showAutoCommandHistoryForSession:(PTYSession *)session;
 
 // Indicates if the ACH window is shown and visible for |session|.
 - (BOOL)autoCommandHistoryIsOpenForSession:(PTYSession *)session;
+- (BOOL)commandHistoryIsOpenForSession:(PTYSession *)session;
+- (void)closeCommandHistory;
+
+- (void)openCommandHistory:(id)sender;
+- (void)openCommandHistoryWithPrefix:(NSString *)prefix 
+                 sortChronologically:(BOOL)sortChronologically
+                  currentSessionOnly:(BOOL)currentSessionOnly;
+- (void)nextMark:(id)sender;
+- (void)previousMark:(id)sender;
 
 @end

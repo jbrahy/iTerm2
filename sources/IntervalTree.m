@@ -1,4 +1,8 @@
 #import "IntervalTree.h"
+#import "DebugLogging.h"
+#import "iTermEncoderAdapter.h"
+#import "iTermGraphEncoder.h"
+#import "NSArray+iTerm.h"
 
 static const long long kMinLocation = LLONG_MIN / 2;
 static const long long kMaxLimit = kMinLocation + LLONG_MAX;
@@ -11,6 +15,73 @@ static NSString *const kIntervalTreeClassNameKey = @"Class";
 static NSString *const kIntervalLocationKey = @"Location";
 static NSString *const kIntervalLengthKey = @"Length";
 
+// Graph encoding keys
+static NSString *const kIntervalTreeObjectsKey = @"objects";
+
+@interface IntervalTreeValue : NSObject
+@property(nonatomic, assign) long long maxLimitAtSubtree;
+@property(nonatomic, retain) NSMutableArray *entries;
+
+// Largest limit of all entries
+@property(nonatomic, readonly) long long maxLimit;
+
+// Interval including intervals of all entries at this entry exactly
+- (Interval *)spanningInterval;
+
+@end
+
+@interface IntervalTreeForwardLocationEnumerator: NSEnumerator {
+    long long previousLocation_;
+    IntervalTree *tree_;
+}
+@property (nonatomic, assign) long long previousLocation;
+@end
+
+@implementation IntervalTreeForwardLocationEnumerator
+@synthesize previousLocation = previousLocation_;
+
+- (instancetype)initWithTree:(IntervalTree *)tree {
+    self = [super init];
+    if (self) {
+        tree_ = [tree retain];
+        previousLocation_ = -2;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [tree_ release];
+    [super dealloc];
+}
+
+- (NSArray *)allObjects {
+    NSMutableArray *result = [NSMutableArray array];
+    NSObject *o = [self nextObject];
+    while (o) {
+        [result addObject:o];
+    }
+    return result;
+}
+
+- (id)nextObject {
+    NSArray *objects;
+    if (previousLocation_ == -1) {
+        objects = [tree_ objectsWithSmallestLocation];
+    } else if (previousLocation_ == -2) {
+        return nil;
+    } else {
+        objects = [tree_ objectsWithSmallestLocationAfter:previousLocation_];
+    }
+    if (!objects.count) {
+        previousLocation_ = -2;
+    } else {
+        id<IntervalTreeObject> obj = objects[0];
+        previousLocation_ = [obj.entry.interval location];
+    }
+    return objects;
+}
+@end
+
 @interface IntervalTreeForwardLimitEnumerator : NSEnumerator {
     long long previousLimit_;
     IntervalTree *tree_;
@@ -21,7 +92,7 @@ static NSString *const kIntervalLengthKey = @"Length";
 @implementation IntervalTreeForwardLimitEnumerator
 @synthesize previousLimit = previousLimit_;
 
-- (id)initWithTree:(IntervalTree *)tree {
+- (instancetype)initWithTree:(IntervalTree *)tree {
     self = [super init];
     if (self) {
         tree_ = [tree retain];
@@ -75,7 +146,7 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 @synthesize previousLimit = previousLimit_;
 
-- (id)initWithTree:(IntervalTree *)tree {
+- (instancetype)initWithTree:(IntervalTree *)tree {
     self = [super init];
     if (self) {
         tree_ = [tree retain];
@@ -130,7 +201,7 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 @synthesize previousLocation = previousLocation_;
 
-- (id)initWithTree:(IntervalTree *)tree {
+- (instancetype)initWithTree:(IntervalTree *)tree {
     self = [super init];
     if (self) {
         tree_ = [tree retain];
@@ -174,6 +245,49 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 @end
 
+@interface IntervalTreeSanitizingEnumerator<T>: NSEnumerator<T>
+
++ (instancetype)with:(NSEnumerator<IntervalTreeImmutableObject> *)source;
+
+@end
+
+@implementation IntervalTreeSanitizingEnumerator  {
+    NSEnumerator<IntervalTreeImmutableObject> *_source;
+}
+
++ (instancetype)with:(NSEnumerator<IntervalTreeImmutableObject> *)source {
+    return [[[self alloc] initWithSource:source] autorelease];
+}
+
+- (instancetype)initWithSource:(NSEnumerator<IntervalTreeImmutableObject> *)source {
+    self = [super init];
+    if (self) {
+        _source = [source retain];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [_source release];
+    [super dealloc];
+}
+
+- (id)nextObject {
+    return [[_source nextObject] mapWithBlock:^id _Nullable(id  _Nonnull anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSUInteger)countByEnumeratingWithState:(NSFastEnumerationState *)state
+                                  objects:(id __unsafe_unretained _Nullable [_Nonnull])buffer
+                                    count:(NSUInteger)len {
+    return [_source countByEnumeratingWithState:state
+                                        objects:buffer
+                                          count:len];
+}
+
+@end
+
 @implementation Interval
 
 + (Interval *)intervalWithDictionary:(NSDictionary *)dict {
@@ -185,18 +299,23 @@ static NSString *const kIntervalLengthKey = @"Length";
 }
 
 + (Interval *)intervalWithLocation:(long long)location length:(long long)length {
-    Interval *interval = [[[Interval alloc] init] autorelease];
-    interval.location = location;
-    interval.length = length;
+    Interval *interval = [[[Interval alloc] initWithLocation:location length:length] autorelease];
     [interval boundsCheck];
     return interval;
 }
 
 + (Interval *)maxInterval {
-    Interval *interval = [[[Interval alloc] init] autorelease];
-    interval.location = kMinLocation;
-    interval.length = kMaxLimit - kMinLocation ;
+    Interval *interval = [[[Interval alloc] initWithLocation:kMinLocation length:kMaxLimit - kMinLocation] autorelease];
     return interval;
+}
+
+- (instancetype)initWithLocation:(long long)location length:(long long)length {
+    self = [super init];
+    if (self) {
+        _location = location;
+        _length = length;
+    }
+    return self;
 }
 
 - (long long)limit {
@@ -212,9 +331,14 @@ static NSString *const kIntervalLengthKey = @"Length";
             self.class, self, self.location, self.limit];
 }
 
+- (NSString *)shortDescription {
+    return [NSString stringWithFormat:@"[%lld, %lld)", self.location, self.limit];
+}
+
 - (void)boundsCheck {
     assert(_location >= kMinLocation);
     assert(_length >= 0);
+    assert(_location + _length >= 0);  // limit must be non-negative
     if (_location > 0) {
         assert(_location < kMaxLimit - _length);
     } else {
@@ -243,10 +367,17 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 + (IntervalTreeEntry *)entryWithInterval:(Interval *)interval
                                   object:(id<IntervalTreeObject>)object {
-    IntervalTreeEntry *entry = [[[IntervalTreeEntry alloc] init] autorelease];
-    entry.interval = interval;
-    entry.object = object;
-    return entry;
+    return [[[self alloc] initWithInterval:interval object:object] autorelease];
+}
+
+- (instancetype)initWithInterval:(Interval *)interval object:(id<IntervalTreeObject>)object {
+    self = [super init];
+    if (self) {
+        assert(object);
+        _interval = [interval retain];
+        _object = [object retain];
+    }
+    return self;
 }
 
 - (void)dealloc {
@@ -275,7 +406,7 @@ static NSString *const kIntervalLengthKey = @"Length";
             entriesString];
 }
 
-- (id)init {
+- (instancetype)init {
     self = [super init];
     if (self) {
         _entries = [[NSMutableArray alloc] init];
@@ -307,29 +438,20 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 @end
 
-@implementation IntervalTree
+@implementation IntervalTree {
+    AATree *_tree;
+    int _count;
+}
 
 - (instancetype)initWithDictionary:(NSDictionary *)dict {
     self = [self init];
     if (self) {
-        for (NSDictionary *entry in dict[kIntervalTreeEntriesKey]) {
-            NSDictionary *intervalDict = entry[kIntervalTreeIntervalKey];
-            NSDictionary *objectDict = entry[kIntervalTreeObjectKey];
-            NSString *className = entry[kIntervalTreeClassNameKey];
-            if (intervalDict && objectDict && className) {
-                Class theClass = NSClassFromString(className);
-                if ([theClass instancesRespondToSelector:@selector(initWithDictionary:)]) {
-                    id<IntervalTreeObject> object = [[theClass alloc] initWithDictionary:objectDict];
-                    Interval *interval = [Interval intervalWithDictionary:intervalDict];
-                    [self addObject:object withInterval:interval];
-                }
-            }
-        }
+        [self restoreFromDictionary:dict];
     }
     return self;
 }
 
-- (id)init {
+- (instancetype)init {
     self = [super init];
     if (self) {
         _tree = [[AATree alloc] initWithKeyComparator:^(NSNumber *key1, NSNumber *key2) {
@@ -350,7 +472,57 @@ static NSString *const kIntervalLengthKey = @"Length";
     [super dealloc];
 }
 
+- (NSString *)debugString {
+    return [_tree debugStringWithDataFormatter:^NSString *(NSString *indent, id data) {
+        IntervalTreeValue *value = data;
+        NSMutableArray *strings = [NSMutableArray array];
+        for (IntervalTreeEntry *entry in value.entries) {
+            [strings addObject:[NSString stringWithFormat:@"%@%@%@", indent, entry.interval.shortDescription, entry.object.debugDescription]];
+        }
+        return [strings componentsJoinedByString:@"\n"];
+    }];
+}
+
+- (void)restoreFromDictionary:(NSDictionary *)dict {
+    for (NSDictionary *entry in dict[kIntervalTreeEntriesKey]) {
+        NSDictionary *intervalDict = entry[kIntervalTreeIntervalKey];
+        NSDictionary *objectDict = entry[kIntervalTreeObjectKey];
+        NSString *className = entry[kIntervalTreeClassNameKey];
+        if (intervalDict && objectDict && className) {
+            Class theClass = NSClassFromString(className);
+            if ([theClass instancesRespondToSelector:@selector(initWithDictionary:)]) {
+                id<IntervalTreeObject> object = [[[theClass alloc] initWithDictionary:objectDict] autorelease];
+                if (object) {
+                    Interval *interval = [Interval intervalWithDictionary:intervalDict];
+                    if (interval.limit >= 0) {
+                        [self addObject:object withInterval:interval];
+                    }
+                }
+            }
+        }
+    }
+}
+
+- (void)removeAllObjects {
+    DLog(@"%p: removeAllObjects", self);
+    for (id<IntervalTreeObject> obj in [self objectsInInterval:[Interval maxInterval]]) {
+        obj.entry = nil;
+    }
+    _tree.delegate = nil;
+    _count = 0;
+    [_tree autorelease];
+    _tree = [[AATree alloc] initWithKeyComparator:^(NSNumber *key1, NSNumber *key2) {
+        return [key1 compare:key2];
+    }];
+    assert(_tree);
+    _tree.delegate = self;
+}
+
 - (void)addObject:(id<IntervalTreeObject>)object withInterval:(Interval *)interval {
+    DLog(@"%p: Add %@ at %@", self, object, interval);
+#if DEBUG
+    [self sanityCheck];
+#endif
     [interval boundsCheck];
     assert(object.entry == nil);  // Object must not belong to another tree
     IntervalTreeEntry *entry = [IntervalTreeEntry entryWithInterval:interval
@@ -366,9 +538,16 @@ static NSString *const kIntervalLengthKey = @"Length";
     }
     object.entry = entry;
     ++_count;
+#if DEBUG
+    [self sanityCheck];
+#endif
 }
 
-- (void)removeObject:(id<IntervalTreeObject>)object {
+- (BOOL)removeObject:(id<IntervalTreeObject>)object {
+    DLog(@"%p: Remove %@", self, object);
+#if DEBUG
+    [self sanityCheck];
+#endif
     Interval *interval = object.entry.interval;
     long long theLocation = interval.location;
     IntervalTreeValue *value = [_tree objectForKey:@(interval.location)];
@@ -391,6 +570,10 @@ static NSString *const kIntervalLengthKey = @"Length";
             [_tree notifyValueChangedForKey:@(theLocation)];
         }
         --_count;
+        return YES;
+    } else {
+        DLog(@"Failed to remove object not in tree");
+        return NO;
     }
 }
 
@@ -402,9 +585,10 @@ static NSString *const kIntervalLengthKey = @"Length";
     if (![toVisit containsObject:node]) {
         return;
     }
-    
+
     [toVisit removeObject:node];
     long long max = [value maxLimit];
+    DLog(@"Recalculate node %p with value %p: value.maxLimit=%@", node, value, @(max));
     if (node.left) {
         if ([toVisit containsObject:node.left]) {
             [self recalculateMaxLimitInSubtreeAtNode:node.left
@@ -412,6 +596,7 @@ static NSString *const kIntervalLengthKey = @"Length";
         }
         IntervalTreeValue *leftValue = (IntervalTreeValue *)node.left.data;
         max = MAX(max, leftValue.maxLimitAtSubtree);
+        DLog(@"Recalculate node %p: leftValue.maxLimit=%@", node, @(leftValue.maxLimitAtSubtree));
     }
     if (node.right) {
         if ([toVisit containsObject:node.right]) {
@@ -420,29 +605,69 @@ static NSString *const kIntervalLengthKey = @"Length";
         }
         IntervalTreeValue *rightValue = (IntervalTreeValue *)node.right.data;
         max = MAX(max, rightValue.maxLimitAtSubtree);
+        DLog(@"Recalculate node %p: rightValue.maxLimit=%@", node, @(rightValue.maxLimitAtSubtree));
     }
+    DLog(@"Recalculate node %p with value %p: new maxLimitAtSubtree is %@", node, value, @(max));
     value.maxLimitAtSubtree = max;
+#if DEBUG
+    const long long bruteForced = [self bruteForceMaxLimitAtSubtree:node];
+    assert(max == bruteForced);
+#endif
 }
 
 #pragma mark - AATreeDelegate
 
+#if DEBUG
+- (BOOL)treeContainsNode:(AATreeNode *)node at:(AATreeNode *)current {
+    if (!current) {
+        return NO;
+    }
+    if (current == node) {
+        return YES;
+    }
+    return [self treeContainsNode:node at:current.left] || [self treeContainsNode:node at:current.right];
+}
+#endif 
+
 - (void)aaTree:(AATree *)tree didChangeSubtreesAtNodes:(NSSet *)changedNodes {
-    NSMutableSet *toVisit = [[changedNodes mutableCopy] autorelease];
+    DLog(@"aaTree:didChangeSubtressAtNodes:");
+    NSMutableSet *toVisit = [NSMutableSet set];
     for (AATreeNode *node in changedNodes) {
-        if ([toVisit containsObject:node]) {
-            [self recalculateMaxLimitInSubtreeAtNode:node
-                               removeFromToVisitList:toVisit];
+        if (node.deleted) {
+            continue;
+        }
+        [toVisit addObject:node];
+        for (AATreeNode *parent in [tree pathFromNode:node]) {
+            [toVisit addObject:parent];
         }
     }
+    while (toVisit.count) {
+        AATreeNode *node = [toVisit anyObject];
+#if DEBUG
+        assert(!node.deleted);
+        assert([self treeContainsNode:node at:_tree.root]);
+#endif
+        DLog(@"  Recalculate node %p", node);
+        [self recalculateMaxLimitInSubtreeAtNode:node
+                           removeFromToVisitList:toVisit];
+    }
+    DLog(@"Done with didChangeSubtreesAtNodes");
+#if DEBUG
+    [self sanityCheck];
+#endif
 }
 
 - (void)aaTree:(AATree *)tree didChangeValueAtNode:(AATreeNode *)node {
+    DLog(@"aaTree:didChangeValueAtNode:");
     NSArray *parents = [tree pathFromNode:node];
     NSMutableSet *parentSet = [NSMutableSet setWithArray:parents];
     for (AATreeNode *theNode in parents) {
         [self recalculateMaxLimitInSubtreeAtNode:theNode
                            removeFromToVisitList:parentSet];
     }
+#if DEBUG
+    [self sanityCheck];
+#endif
 }
 
 - (void)addObjectsInInterval:(Interval *)interval
@@ -453,7 +678,7 @@ static NSString *const kIntervalLengthKey = @"Length";
         // The whole subtree has intervals that end before the requested |interval|.
         return;
     }
-    
+
     Interval *nodeInterval = [nodeValue spanningInterval];
     if ([nodeInterval intersects:interval]) {
         // An entry at this node could possibly intersect the desired interval.
@@ -477,14 +702,22 @@ static NSString *const kIntervalLengthKey = @"Length";
     }
 }
 
-- (NSArray *)objectsInInterval:(Interval *)interval {
+- (NSArray<id<IntervalTreeObject>> *)mutableObjectsInInterval:(Interval *)interval {
     NSMutableArray *array = [NSMutableArray array];
     [self addObjectsInInterval:interval toArray:array fromNode:_tree.root];
     return array;
 }
 
+- (NSArray<id<IntervalTreeImmutableObject>> *)objectsInInterval:(Interval *)interval {
+    return [self mutableObjectsInInterval:interval];
+}
+
 - (NSArray *)allObjects {
     return [self objectsInInterval:[Interval maxInterval]];
+}
+
+- (NSArray<id<IntervalTreeObject>> *)mutableObjects {
+    return [self mutableObjectsInInterval:[Interval maxInterval]];
 }
 
 - (NSInteger)count {
@@ -492,7 +725,7 @@ static NSString *const kIntervalLengthKey = @"Length";
 }
 
 - (NSString *)description {
-    return [NSString stringWithFormat:@"<%@: %p tree=%@>", self.class, self, _tree];
+    return [NSString stringWithFormat:@"<%@: %p tree=%@>", self.class, self, _tree.description];
 }
 
 - (BOOL)containsObject:(id<IntervalTreeObject>)object {
@@ -516,9 +749,9 @@ static NSString *const kIntervalLengthKey = @"Length";
 
     NSMutableArray *objects = [NSMutableArray array];
     if (myMaxLimit == bestLimit) {
-        IntervalTreeValue *value = node.data;
+        IntervalTreeValue *nodeValue = node.data;
         long long maxLimit = LLONG_MIN;
-        for (IntervalTreeEntry *entry in value.entries) {
+        for (IntervalTreeEntry *entry in nodeValue.entries) {
             if (entry.interval.limit > maxLimit) {
                 [objects removeAllObjects];
                 [objects addObject:entry.object];
@@ -537,6 +770,26 @@ static NSString *const kIntervalLengthKey = @"Length";
     return objects.count ? objects : nil;
 }
 
+- (NSArray *)objectsWithSmallestLocationFromNode:(AATreeNode *)node {
+    if (!node) {
+        return nil;
+    }
+    if (node.left) {
+        return [self objectsWithSmallestLimitFromNode:node.left];
+    }
+    if (node.data) {
+        IntervalTreeValue *nodeValue = (IntervalTreeValue *)node.data;
+        if (nodeValue.entries.count) {
+            NSMutableArray *objects = [NSMutableArray arrayWithCapacity:nodeValue.entries.count];
+            for (IntervalTreeEntry *entry in nodeValue.entries) {
+                [objects addObject:entry.object];
+            }
+            return objects;
+        }
+    }
+    return [self objectsWithSmallestLimitFromNode:node.right];
+}
+
 - (NSArray *)objectsWithSmallestLimitFromNode:(AATreeNode *)node {
     if (!node) {
         return nil;
@@ -548,7 +801,7 @@ static NSString *const kIntervalLengthKey = @"Length";
     if (node.left) {
         objectsFromLeft = [self objectsWithSmallestLimitFromNode:node.left];
     }
-    
+
     Interval *nodeInterval = nil;
     NSMutableArray *myObjects = [NSMutableArray array];
     // Set nodeInterval to the best interval in this node's value.
@@ -565,14 +818,14 @@ static NSString *const kIntervalLengthKey = @"Length";
             [myObjects addObject:entry.object];
         }
     }
-    
+
     NSArray *objectsFromRight = nil;
     id<IntervalTreeObject> leftValue = objectsFromLeft[0];
     if (node.right &&
         (!objectsFromLeft.count || nodeInterval.location < leftValue.entry.interval.limit)) {
         objectsFromRight = [self objectsWithSmallestLimitFromNode:node.right];
     }
-    
+
     id<IntervalTreeObject> rightValue = objectsFromRight[0];
     long long selfLimit = LLONG_MAX, leftLimit = LLONG_MAX, rightLimit = LLONG_MAX;
     if (nodeInterval) {
@@ -596,6 +849,14 @@ static NSString *const kIntervalLengthKey = @"Length";
         [result addObjectsFromArray:objectsFromRight];
     }
     return result.count ? result : nil;
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> * _Nullable)objectsWithSmallestLocation {
+    return [self objectsWithSmallestLocationFromNode:_tree.root];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithSmallestLocationAfter:(long long)location {
+    return [self objectsWithSmallestLocationAfter:location fromNode:_tree.root];
 }
 
 - (NSArray *)objectsWithSmallestLimit {
@@ -654,6 +915,31 @@ static NSString *const kIntervalLengthKey = @"Length";
     return objects;
 }
 
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithSmallestLocationAfter:(long long)location fromNode:(AATreeNode *)node {
+    if (!node) {
+        return nil;
+    }
+
+    const long long key = [node.key longLongValue];
+    if (key > location && node.left) {
+        NSArray *left = [self objectsWithSmallestLocationAfter:location fromNode:node.left];
+        if (left.count) {
+            return left;
+        }
+    }
+    if (key > location && node.data) {
+        IntervalTreeValue *value = node.data;
+        if (value) {
+            NSMutableArray *objects = [NSMutableArray array];
+            for (IntervalTreeEntry *entry in value.entries) {
+                [objects addObject:entry.object];
+            }
+            return objects;
+        }
+    }
+    return [self objectsWithSmallestLocationAfter:location fromNode:node.right];
+}
+
 - (NSArray *)objectsWithSmallestLimitAfter:(long long)bound fromNode:(AATreeNode *)node {
     if (!node) {
         return nil;
@@ -677,20 +963,20 @@ static NSString *const kIntervalLengthKey = @"Length";
             [myObjects addObject:entry.object];
         }
     }
-    
-    
+
+
     NSArray *leftObjects = nil;
     NSArray *rightObjects = nil;
-    
+
     IntervalTreeValue *leftValue = (IntervalTreeValue *)node.left.data;
     IntervalTreeValue *rightValue = (IntervalTreeValue *)node.right.data;
-    
+
     if (node.left && leftValue.maxLimitAtSubtree > bound) {
         leftObjects = [self objectsWithSmallestLimitAfter:bound fromNode:node.left];
     }
-    
+
     long long thisLocation = [node.key longLongValue];
-    
+
     // ignore right subtree if node's location > left subtree's smallest limit and left subtree's
     // smallest limit < bound (because every interval in the right subtree will have a limit larger
     // than this node's location, and the left subtree has an interval that ends before that
@@ -705,7 +991,7 @@ static NSString *const kIntervalLengthKey = @"Length";
         !thisNodesLocationIsAfterLeftSubtreesSmallestLimitAfterBound) {
         rightObjects = [self objectsWithSmallestLimitAfter:bound fromNode:node.right];
     }
-    
+
     id<IntervalTreeObject> bestRight = rightObjects[0];
     long long selfLimit = LLONG_MAX, leftLimit = LLONG_MAX, rightLimit = LLONG_MAX;
     if (nodeInterval) {
@@ -738,7 +1024,7 @@ static NSString *const kIntervalLengthKey = @"Length";
     }
     Interval *nodeInterval = nil;
     long long thisLocation = [node.key longLongValue];
-    
+
     // Set nodeInterval to the best interval in this node's value.
     IntervalTreeValue *nodeValue = (IntervalTreeValue *)node.data;
     NSMutableArray *myObjects = nil;
@@ -757,7 +1043,7 @@ static NSString *const kIntervalLengthKey = @"Length";
             [myObjects addObject:entry.object];
         }
     }
-    
+
     NSArray *leftObjects = nil;
     NSArray *rightObjects = nil;
     IntervalTreeValue *leftValue = (IntervalTreeValue *)node.left.data;
@@ -804,7 +1090,7 @@ static NSString *const kIntervalLengthKey = @"Length";
         myLimit = nodeInterval.limit;
     }
     long long bestLimit = MAX(MAX(leftLimit, rightLimit), myLimit);
-    
+
     NSMutableArray *result = [NSMutableArray array];
     if (myLimit == bestLimit) {
         [result addObjectsFromArray:myObjects];
@@ -824,6 +1110,13 @@ static NSString *const kIntervalLengthKey = @"Length";
 
 - (NSArray *)objectsWithSmallestLimitAfter:(long long)limit {
     return [self objectsWithSmallestLimitAfter:limit fromNode:_tree.root];
+}
+
+- (NSEnumerator *)reverseEnumerator {
+    IntervalTreeReverseEnumerator *enumerator =
+        [[[IntervalTreeReverseEnumerator alloc] initWithTree:self] autorelease];
+    enumerator.previousLocation = INT64_MAX;
+    return enumerator;
 }
 
 - (NSEnumerator *)reverseEnumeratorAt:(long long)start {
@@ -850,12 +1143,62 @@ static NSString *const kIntervalLengthKey = @"Length";
     return enumerator;
 }
 
+- (NSEnumerator *)forwardLocationEnumeratorAt:(long long)start {
+    assert(start >= 0);
+    IntervalTreeForwardLocationEnumerator *enumerator =
+    [[[IntervalTreeForwardLocationEnumerator alloc] initWithTree:self] autorelease];
+    enumerator.previousLocation = start - 1;
+    return enumerator;
+}
+
 - (NSEnumerator *)reverseLimitEnumerator {
     return [[[IntervalTreeReverseLimitEnumerator alloc] initWithTree:self] autorelease];
 }
 
 - (NSEnumerator *)forwardLimitEnumerator {
     return [[[IntervalTreeForwardLimitEnumerator alloc] initWithTree:self] autorelease];
+}
+
+- (void)enumerateLimitsAfter:(long long)minimumLimit
+                       block:(void (^)(id<IntervalTreeObject> object, BOOL *stop))block {
+    [self enumerateLimitsAfter:minimumLimit atNode:_tree.root block:block];
+}
+
+// returns whether the block directed us to stop enumerating.
+- (BOOL)enumerateLimitsAfter:(long long)minimumLimit
+                      atNode:(AATreeNode *)node
+                       block:(void (^)(id<IntervalTreeObject> object, BOOL *stop))block {
+    if (!node) {
+        return NO;
+    }
+    IntervalTreeValue *value = node.data;
+    if (value.maxLimit < minimumLimit) {
+        return NO;
+    }
+    for (IntervalTreeEntry *entry in value.entries) {
+        if (entry.interval.limit < minimumLimit) {
+            continue;
+        }
+        BOOL stop = NO;
+        block(entry.object, &stop);
+        if (stop) {
+            return YES;
+        }
+    }
+    const long long leftMaxLimit = ((IntervalTreeValue *)node.left.data).maxLimitAtSubtree;
+    if (leftMaxLimit >= minimumLimit) {
+        if ([self enumerateLimitsAfter:minimumLimit atNode:node.left block:block]) {
+            return YES;
+        }
+    }
+
+    const long long rightMaxLimit = ((IntervalTreeValue *)node.right.data).maxLimitAtSubtree;
+    if (rightMaxLimit >= minimumLimit) {
+        if ([self enumerateLimitsAfter:minimumLimit atNode:node.right block:block]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 - (long long)bruteForceMaxLimitAtSubtree:(AATreeNode *)node {
@@ -876,7 +1219,8 @@ static NSString *const kIntervalLengthKey = @"Length";
 - (void)sanityCheckAtNode:(AATreeNode *)node {
     IntervalTreeValue *value = node.data;
     long long location = [(NSNumber *)node.key longLongValue];
-    assert(value.maxLimitAtSubtree = [self bruteForceMaxLimitAtSubtree:node]);
+    const long long limit = [self bruteForceMaxLimitAtSubtree:node];
+    assert(value.maxLimitAtSubtree == limit);
     IntervalTreeValue *leftValue = node.left.data;
     IntervalTreeValue *rightValue = node.right.data;
     if (leftValue) {
@@ -889,33 +1233,301 @@ static NSString *const kIntervalLengthKey = @"Length";
         assert(entry.interval.location == location);
         assert(entry.interval.limit <= value.maxLimitAtSubtree);
     }
-    
+
     if (node.left) {
         [self sanityCheckAtNode:node.left];
+        assert(node.left != node.right);
     }
     if (node.right) {
         [self sanityCheckAtNode:node.right];
+        assert(node.left != node.right);
     }
 }
-- (void)sanityCheck {
-    [self sanityCheckAtNode:_tree.root];
-}
 
-- (NSString *)debugString {
-    return [_tree description];
+- (void)sanityCheck {
+#ifdef INTERVAL_TREE_SANITY_CHECK
+    NSMutableSet *values = [NSMutableSet set];
+    for (id value in _tree.allValues) {
+        NSString *addr = [NSString stringWithFormat:@"%p", value];
+        if ([values containsObject:addr]) {
+            NSLog(@"Dup found");
+            assert(NO);
+        }
+        [values addObject:addr];
+    }
+
+    if (_tree.root) {
+        [self sanityCheckAtNode:_tree.root];
+    }
+#endif  // INTERVAL_TREE_SANITY_CHECK
 }
 
 - (NSDictionary *)dictionaryValueWithOffset:(long long)offset {
     NSMutableArray *objectDicts = [NSMutableArray array];
     for (id<IntervalTreeObject> object in self.allObjects) {
-        Interval *interval = object.entry.interval;
-        interval.location = interval.location + offset;
-        [objectDicts addObject:@{ kIntervalTreeIntervalKey: object.entry.interval.dictionaryValue,
+        // Skip objects that would have negative limits after adjustment - they represent
+        // content that has scrolled off and isn't being saved.
+        long long adjustedLocation = object.entry.interval.location + offset;
+        long long adjustedLength = object.entry.interval.length;
+        const long long adjustedLimit = adjustedLocation + adjustedLength;
+        if (adjustedLimit < 0) {
+            continue;
+        }
+        // Clip intervals that start before the saved region but extend into it.
+        if (adjustedLocation < 0) {
+            adjustedLength += adjustedLocation;  // Reduce length by the negative offset
+            adjustedLocation = 0;
+        }
+        Interval *interval = [Interval intervalWithLocation:adjustedLocation
+                                                     length:adjustedLength];
+        [objectDicts addObject:@{ kIntervalTreeIntervalKey: interval.dictionaryValue,
                                   kIntervalTreeObjectKey: object.dictionaryValue,
                                   kIntervalTreeClassNameKey: NSStringFromClass(object.class) }];
-        interval.location = interval.location - offset;
     }
     return @{ kIntervalTreeEntriesKey: objectDicts };
 }
 
+#pragma mark - Graph Encoding
+
+- (void)encodeWithEncoder:(id<iTermEncoderAdapter>)encoder
+                   offset:(long long)offset {
+    // Build identifier list from all objects, filtering out those that would have negative
+    // limits after adjustment (they represent content that has scrolled off).
+    NSMutableArray<NSString *> *identifiers = [NSMutableArray array];
+    NSMutableDictionary<NSString *, id<IntervalTreeObject>> *objectsByGuid = [NSMutableDictionary dictionary];
+
+    for (id<IntervalTreeObject> object in self.allObjects) {
+        const long long adjustedLimit = object.entry.interval.location + offset + object.entry.interval.length;
+        if (adjustedLimit < 0) {
+            continue;
+        }
+        NSString *identifier = object.stableIdentifier;
+        [identifiers addObject:identifier];
+        objectsByGuid[identifier] = object;
+    }
+
+    [encoder encodeArrayWithKey:kIntervalTreeObjectsKey
+                    identifiers:identifiers
+                     generation:iTermGenerationAlwaysEncode
+                          block:^BOOL(id<iTermEncoderAdapter> subencoder,
+                                      NSInteger i,
+                                      NSString *identifier,
+                                      BOOL *stop) {
+        id<IntervalTreeObject> object = objectsByGuid[identifier];
+        Interval *interval = object.entry.interval;
+
+        // Compute adjusted interval, clipping to non-negative location if needed.
+        long long adjustedLocation = interval.location + offset;
+        long long adjustedLength = interval.length;
+        if (adjustedLocation < 0) {
+            adjustedLength += adjustedLocation;  // Reduce length by the negative offset
+            adjustedLocation = 0;
+        }
+        Interval *adjustedInterval = [Interval intervalWithLocation:adjustedLocation
+                                                             length:adjustedLength];
+        [subencoder mergeDictionary:@{
+            kIntervalTreeIntervalKey: adjustedInterval.dictionaryValue,
+            kIntervalTreeClassNameKey: NSStringFromClass(object.class)
+        }];
+
+        // Content - use generation if available (e.g., FoldMark), otherwise always encode.
+        // Objects with a generation property (like FoldMark) have immutable content, so we only
+        // need to encode them once; the delta encoder will skip subsequent saves.
+        NSInteger gen = iTermGenerationAlwaysEncode;
+        if ([object respondsToSelector:@selector(generation)]) {
+            gen = [(id)object generation];
+        }
+
+        return [subencoder encodeDictionaryWithKey:@"content"
+                                       generation:gen
+                                            block:^BOOL(id<iTermEncoderAdapter> contentEncoder) {
+            [contentEncoder mergeDictionary:object.dictionaryValue];
+            return YES;
+        }];
+    }];
+}
+
+- (BOOL)restoreFromGraphRecord:(NSDictionary *)dict
+                        offset:(long long)offset {
+    // Check if this is graph-encoded format (has "objects" key)
+    NSArray *objects = dict[kIntervalTreeObjectsKey];
+    if (!objects) {
+        return NO;
+    }
+
+    for (NSDictionary *entry in objects) {
+        NSDictionary *intervalDict = entry[kIntervalTreeIntervalKey];
+        NSDictionary *contentDict = entry[@"content"];
+        NSString *className = entry[kIntervalTreeClassNameKey];
+
+        if (!intervalDict || !contentDict || !className) {
+            continue;
+        }
+
+        Class theClass = NSClassFromString(className);
+        if (!theClass) {
+            continue;
+        }
+        if (![theClass conformsToProtocol:@protocol(IntervalTreeObject)]) {
+            continue;
+        }
+        if (![theClass instancesRespondToSelector:@selector(initWithDictionary:)]) {
+            continue;
+        }
+
+        id<IntervalTreeObject> object = [[[theClass alloc] initWithDictionary:contentDict] autorelease];
+        if (!object) {
+            continue;
+        }
+
+        Interval *interval = [Interval intervalWithDictionary:intervalDict];
+        if (!interval) {
+            continue;
+        }
+
+        // Adjust for offset (the stored interval has offset baked in, so subtract it)
+        interval = [Interval intervalWithLocation:interval.location - offset
+                                           length:interval.length];
+        if (interval.limit >= 0) {
+            [self addObject:object withInterval:interval];
+        }
+    }
+
+    return YES;
+}
+
 @end
+
+@implementation iTermIntervalTreeSanitizingAdapter {
+    __weak IntervalTree *_source;
+}
+
+- (instancetype)initWithSource:(IntervalTree *)source {
+    self = [super init];
+    if (self) {
+        _source = source;
+    }
+    return self;
+}
+
+- (NSString *)debugString {
+    return [_source debugString];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *)objectsInInterval:(Interval *)interval {
+    return [[_source objectsInInterval:interval] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *)allObjects {
+    return [[_source allObjects] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (BOOL)containsObject:(id<IntervalTreeImmutableObject> _Nullable)object {
+    return [_source containsObject:[object progenitor]];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> * _Nullable)objectsWithLargestLimit {
+    return [[_source objectsWithLargestLimit] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> * _Nullable)objectsWithSmallestLimit {
+    return [[_source objectsWithSmallestLimit] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return[ anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithLargestLocation {
+    return [[_source objectsWithLargestLocation] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithLargestLocationBefore:(long long)location {
+    return [[_source objectsWithLargestLocationBefore:location] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithLargestLimitBefore:(long long)limit {
+    return [[_source objectsWithLargestLimitBefore:limit] mapWithBlock:^id(id anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSArray<id<IntervalTreeImmutableObject>> *_Nullable)objectsWithSmallestLimitAfter:(long long)limit {
+    return [[_source objectsWithSmallestLimitAfter:limit] mapWithBlock:^id(id<IntervalTreeImmutableObject> anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)reverseEnumerator {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source reverseEnumerator]];
+}
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)reverseEnumeratorAt:(long long)start {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source reverseEnumeratorAt:start]];
+}
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)reverseLimitEnumeratorAt:(long long)start {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source reverseLimitEnumeratorAt:start]];
+}
+
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)forwardLimitEnumeratorAt:(long long)start {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source forwardLimitEnumeratorAt:start]];
+}
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)reverseLimitEnumerator {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source reverseLimitEnumerator]];
+}
+
+- (NSEnumerator<IntervalTreeImmutableObject> *)forwardLimitEnumerator {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source forwardLimitEnumerator]];
+}
+
+- (NSDictionary *)dictionaryValueWithOffset:(long long)offset {
+    return [_source dictionaryValueWithOffset:offset];
+}
+
+- (void)enumerateLimitsAfter:(long long)minimumLimit block:(void (^)(id<IntervalTreeObject> _Nonnull, BOOL * _Nonnull))block {
+    [_source enumerateLimitsAfter:minimumLimit block:^(id<IntervalTreeObject>  _Nonnull object, BOOL * _Nonnull stop) {
+        block(object.doppelganger, stop);
+    }];
+}
+
+- (nonnull NSEnumerator<IntervalTreeImmutableObject> *)forwardLocationEnumeratorAt:(long long)start {
+    return [IntervalTreeSanitizingEnumerator<IntervalTreeImmutableObject> with:[_source forwardLocationEnumeratorAt:start]];
+}
+
+
+- (NSArray<id<IntervalTreeImmutableObject>> * _Nullable)objectsWithSmallestLocation {
+    return [[_source objectsWithSmallestLocation] mapWithBlock:^id _Nullable(id<IntervalTreeImmutableObject>  _Nonnull anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+
+- (NSArray<id<IntervalTreeImmutableObject>> * _Nullable)objectsWithSmallestLocationAfter:(long long)location {
+    return [[_source objectsWithSmallestLocationAfter:location] mapWithBlock:^id _Nullable(id<IntervalTreeImmutableObject>  _Nonnull anObject) {
+        return [anObject doppelganger];
+    }];
+}
+
+- (void)encodeWithGraphEncoder:(iTermGraphEncoder *)encoder
+                        offset:(long long)offset {
+    [_source encodeWithGraphEncoder:encoder offset:offset];
+}
+
+- (void)encodeWithEncoder:(id<iTermEncoderAdapter>)encoder
+                   offset:(long long)offset {
+    [_source encodeWithEncoder:encoder offset:offset];
+}
+
+@end
+

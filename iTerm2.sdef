@@ -9,13 +9,6 @@
             <enumerator name="ask" code="ask " 
                     description="Ask the user whether or not to save the file."/> 
     </enumeration> 
-    <command name="quit" code="aevtquit" description="Quit the application."> 
-      <cocoa class="NSQuitCommand"/> 
-      <parameter name="saving" code="savo" type="save options" optional="yes" 
-        description="Whether or not changed documents should be saved before closing."> 
-        <cocoa key="SaveOptions"/> 
-      </parameter> 
-    </command> 
     <command name="count" code="corecnte" 
       description="Return the number of elements of a particular class within an object."> 
       <cocoa class="NSCountCommand"/> 
@@ -84,7 +77,7 @@
       <cocoa class="iTermApplication"/>
       <property name="current window" code="Crwn" type="window"
         description="The frontmost window">
-        <cocoa key="currentWindow" />
+        <cocoa key="currentScriptingWindow" />
       </property>
 
       <property name="name" code="pnam" type="text" access="r" 
@@ -96,12 +89,23 @@
       <property name="version" code="vers" type="text" access="r" 
         description="The version of the application."/> 
       <element type="window" access="r"> 
-        <cocoa key="orderedWindows"/> 
+        <cocoa key="orderedScriptingWindows"/> 
       </element> 
     </class> 
     <class name="window" code="cwin" description="A window."> 
-      <cocoa class="PTYWindow"/> 
-      <property name="name" code="pnam" type="text" access="r" 
+      <cocoa class="iTermScriptingWindow"/>
+      <!-- Prior to 3.0.4, id was a string with code "ID  " that had a value like "window-1" which
+       coincides with the unique identifier used in a window's object specifier. Issue 4825 points 
+       out this is problematic because integral window IDs are useful as arguments to 
+       screencapture -l. So the old id is now available as "alternate identifier" and id is now the
+       standard integer value. -->
+      <property name="id" code="ID  " description="The unique identifier of the session." type="integer" access="r">
+        <cocoa key="uniqueID"/>
+      </property>
+      <property name="alternate identifier" code="Twid" description="The alternate unique identifier of the session." type="text" access="r">
+          <cocoa key="windowIdentifier"/>
+      </property>
+      <property name="name" code="pnam" type="text" access="r"
         description="The full title of the window."> 
         <cocoa key="title"/> 
       </property> 
@@ -175,6 +179,28 @@
         <cocoa key="currentSession" />
       </property>
 
+      <property name="is hotkey window" code="ihkw" type="boolean"
+          description="Whether the window is a hotkey window.">
+          <cocoa key="isHotkeyWindow"/>
+      </property>
+
+      <property name="hotkey window profile" code="hkwp" type="text"
+          description="If the window is a hotkey window, this gives the name of the profile that created the window. ">
+          <cocoa key="hotkeyWindowProfile"/>
+      </property>
+
+      <responds-to command="reveal hotkey window">
+        <cocoa method="handleRevealHotkeyWindowCommand:"/>
+      </responds-to>
+
+      <responds-to command="hide hotkey window">
+        <cocoa method="handleHideHotkeyWindowCommand:"/>
+      </responds-to>
+
+      <responds-to command="toggle hotkey window">
+        <cocoa method="handleToggleHotkeyWindowCommand:"/>
+      </responds-to>
+
       <!-- compatibility -->
       <property name="position" description="The position of the window, relative to the upper left corner of the screen." code="ppos" type="point">
         <cocoa key="scriptPosition" />
@@ -226,6 +252,16 @@
         description="the session, tab, or window to close."/>
     </command>
 
+    <command name="request cookie" code="Itrmrqck" description="Request a Python API cookie">
+        <cocoa class="iTermRequestCookieCommand" />
+        <parameter name="and key for app named" code="Rcsn" type="text" optional="yes"
+            description="Name of script using the cookie. This is shown in the console.">
+            <cocoa key="appName"/>
+        </parameter>
+        <result type="text"
+          description="A cookie that can be used to connect to the Python API endpoint" />
+    </command>
+
     <command name="create tab" code="Itrmntwp"
       description="Create a new tab">
       <direct-parameter type="specifier"
@@ -272,6 +308,38 @@
       <result type="window" description="The window that was created"/>
     </command>
 
+    <command name="create hotkey window with profile" code="Itrmnhwp"
+      description="Create a hotkey window">
+      <cocoa class="iTermNewHotkeyWindowCommand" />
+      <direct-parameter description="The profile name">
+        <type type="text"/>
+      </direct-parameter>
+
+      <result type="window" description="The window that was created"/>
+    </command>
+
+    <command name="launch API script named" code="Itrmlasn"
+        description="Launch API script by name">
+        <cocoa class="iTermLaunchAPIScriptCommand" />
+        <direct-parameter description="The script’s name">
+            <type type="text"/>
+        </direct-parameter>
+        <parameter name="arguments" code="Asar" optional="yes"
+          description="Arguments to pass to script">
+          <cocoa key="arguments"/>
+          <type type="text" list="yes"/>
+        </parameter>
+    </command>
+
+    <command name="invoke API expression" code="Itrmiaex"
+        description="Invokes an expression, such as a registered function.">
+        <cocoa class="iTermInvokeAPIExpressionCommand" />
+        <direct-parameter description="The expression to invoke, such as a function call.">
+            <type type="text"/>
+        </direct-parameter>
+        <result type="text" description="String representation of the result, if available. Function calls’ return values are not available." />
+    </command>
+
     <command name="create window with default profile" code="Itrmnwwn"
       description="Create a new window with the default profile">
       <cocoa class="iTermNewWindowCommand" />
@@ -313,18 +381,30 @@
           description="Name of profile for new session.">
         <cocoa key="profile" />
       </parameter>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
     </command>
 
     <command name="split vertically with default profile" code="Itrmsvdp"
         description="Split a session vertically, using the default profile for the new session">
       <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
     </command>
 
     <command name="split vertically with same profile" code="Itrmsvsp"
         description="Split a session vertically, using the original session's profile for the new session">
       <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
     </command>
 
@@ -335,19 +415,73 @@
           description="Name of profile for new session.">
         <cocoa key="profile" />
       </parameter>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
     </command>
 
     <command name="split horizontally with default profile" code="Itrmshdp"
         description="Split a session horizontally, using the default profile for the new session">
       <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
     </command>
 
     <command name="split horizontally with same profile" code="Itrmshsp"
         description="Split a session horizontally, using the original session's profile for the new session">
       <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="command" code="Nwcm" type="text" optional="yes"
+          description="Shell command to run">
+          <cocoa key="command"/>
+      </parameter>
       <result type="session" description="The session that was created"/>
+    </command>
+
+    <command name="variable" code="Itrmvarb"
+        description="Returns the value of a session variable with the given name">
+      <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="named" code="Namd" type="text" optional="no"
+          description="Name of variable">
+          <cocoa key="name"/>
+      </parameter>
+      <result type="text" description="The variable's value"/>
+    </command>
+
+    <command name="set variable" code="Itrmsvar"
+        description="Sets the value of a session variable">
+      <direct-parameter type="specifier" description="The object to send to"/>
+      <parameter name="named" code="Namd" type="text" optional="no"
+          description="Name of variable">
+          <cocoa key="name"/>
+      </parameter>
+      <parameter name="to" code="Tovl" type="text" optional="no"
+          description="New value">
+          <cocoa key="value"/>
+      </parameter>
+      <result type="text" description="The variable's value"/>
+    </command>
+
+    <command name="reveal hotkey window" code="Itrmrhkw"
+        description="Reveals a hotkey window. Only to be called on windows that are hotkey windows.">
+        <direct-parameter type="specifier"
+        description="The window in which to create a new tab"/>
+    </command>
+
+    <command name="hide hotkey window" code="Itrmhhkw"
+        description="Hides a hotkey window. Only to be called on windows that are hotkey windows.">
+        <direct-parameter type="specifier"
+        description="The window in which to create a new tab"/>
+    </command>
+
+    <command name="toggle hotkey window" code="Itrmthkw"
+        description="Toggles the visibility of a hotkey window. Only to be called on windows that are hotkey windows.">
+        <direct-parameter type="specifier"
+        description="The window in which to create a new tab"/>
     </command>
 
     <value-type name="RGB color" code="cRGB">
@@ -375,6 +509,10 @@
       <property name="index" code="Indx" type="integer"
           description="Index of tab in parent tab view control">
         <cocoa key="indexOfTab" />
+      </property>
+
+      <property name="title" code="titl" type="text">
+        <cocoa key="title" />
       </property>
     </class>
 
@@ -409,6 +547,9 @@
         <cocoa method="handleSplitHorizontallyWithSameProfile:" />
       </responds-to>
 
+      <property name="id" code="ID  " description="The unique identifier of the session." type="text" access="r">
+              <cocoa key="guid"/>
+      </property>
       <property name="is processing" code="Prcs" type="boolean"
           description="The session has received output recently.">
         <cocoa key="isProcessing" />
@@ -426,8 +567,14 @@
       <property name="tty" code="Stty" type="text" access="r">
         <cocoa key="tty" />
       </property>
-      <property name="contents" code="Cntt" type="text">
-        <cocoa key="contents" />
+      <property name="contents" code="Cntt" type="text" description="The currently visible contents of the session.">
+        <cocoa key="text" />
+      </property>
+      <property name="text" description="The currently visible contents of the session." code="pcnt" type="text" access="r">
+        <cocoa key="text" />
+      </property>
+      <property name="color preset" code="Copr" type="text">
+          <cocoa key="colorPresetName" />
       </property>
       <property name="background color" code="Co00" type="RGB color">
         <cocoa key="backgroundColor" />
@@ -499,6 +646,14 @@
         <cocoa key="ansiBrightWhiteColor" />
       </property>
 
+      <property name="underline color" code="Co23" type="RGB color">
+        <cocoa key="underlineColor" />
+      </property>
+      <property name="use underline color" code="Undl" type="boolean"
+        description="Whether the use a dedicated color for underlining.">
+        <cocoa key="useUnderlineColor"/>
+      </property>
+
       <property name="background image" code="Bgim" type="text">
         <cocoa key="backgroundImagePath" />
       </property>
@@ -514,6 +669,22 @@
       <property name="unique ID" code="Uniq" type="text" access="r">
         <cocoa key="guid" />
       </property>
+
+      <property name="profile name" code="Pfnm" description="The session's profile name" type="text" access="r">
+        <cocoa key="profileNameForScripting"/>
+      </property>
+
+      <property name="answerback string" code="Answ" description="ENQ Answerback string" type="text">
+        <cocoa key="answerBackString"/>
+      </property>
+
+      <responds-to command="variable">
+        <cocoa method="handleVariableNamedCommand:"/>
+      </responds-to>
+
+      <responds-to command="set variable">
+        <cocoa method="handleSetVariableNamedCommand:"/>
+      </responds-to>
 
     </class>
 

@@ -7,11 +7,16 @@
 //
 
 #import "iTermSemanticHistoryController.h"
+
+#import "iTermObject.h"
 #import "iTermSemanticHistoryPrefsController.h"
+#import "iTermVariables.h"
+#import "iTermVariableScope.h"
 #import "NSFileManager+iTerm.h"
+#import "NSStringITerm.h"
 #import <XCTest/XCTest.h>
 
-@interface iTermSemanticHistoryTest : XCTestCase
+@interface iTermSemanticHistoryTest : XCTestCase<iTermObject>
 @end
 
 @interface iTermFakeFileManager : NSFileManager
@@ -57,11 +62,25 @@
     return NO;
 }
 
-- (BOOL)fileExistsAtPathLocally:(NSString *)filename {
-    for (NSString *networkPath in _networkMountPoints) {
+- (BOOL)fileIsLocal:(NSString *)filename additionalNetworkPaths:(NSArray<NSString *> *)additionalNetworkPaths {
+    NSMutableArray *networkPaths = [[_networkMountPoints mutableCopy] autorelease];
+    [networkPaths addObjectsFromArray:additionalNetworkPaths];
+    for (NSString *networkPath in networkPaths) {
         if ([filename hasPrefix:networkPath]) {
             return NO;
         }
+    }
+    return YES;
+}
+
+- (BOOL)fileExistsAtPathLocally:(NSString *)filename
+         additionalNetworkPaths:(NSArray<NSString *> *)additionalNetworkPaths
+             allowNetworkMounts:(BOOL)allowNetworkMounts {
+    if (allowNetworkMounts) {
+        return YES;
+    }
+    if (![self fileIsLocal:filename additionalNetworkPaths:additionalNetworkPaths]) {
+        return NO;
     }
 
     return [self fileExistsAtPath:filename];
@@ -111,12 +130,17 @@
     return _fakeFileManager;
 }
 
-- (void)launchTaskWithPath:(NSString *)path arguments:(NSArray *)arguments wait:(BOOL)wait {
+- (void)launchTaskWithPath:(NSString *)path arguments:(NSArray *)arguments completion:(void (^)(void))completion {
     self.scriptArguments = arguments;
+    completion();
 }
 
-- (BOOL)openFile:(NSString *)fullPath {
-    self.openedFile = fullPath;
+- (BOOL)openFile:(NSString *)fullPath fragment:(NSString *)fragment {
+    if (fragment) {
+        self.openedFile = [NSString stringWithFormat:@"%@#%@", fullPath, fragment];
+    } else {
+        self.openedFile = fullPath;
+    }
     return YES;
 }
 
@@ -147,6 +171,10 @@
     }
 }
 
+- (NSTimeInterval)evaluationTimeout {
+    return 0;
+}
+
 @end
 
 @interface iTermSemanticHistoryTest ()<iTermSemanticHistoryControllerDelegate>
@@ -155,9 +183,15 @@
 @implementation iTermSemanticHistoryTest {
     TestSemanticHistoryController *_semanticHistoryController;
     NSString *_coprocessCommand;
+    iTermVariableScope *_scope;
+    iTermVariables *_variables;
 }
 
 - (void)setUp {
+    _scope = [[iTermVariableScope alloc] init];
+    _variables = [[iTermVariables alloc] initWithContext:iTermVariablesSuggestionContextNone owner:self];
+    [_scope addVariables:_variables toScopeNamed:nil];
+
     _semanticHistoryController = [[[TestSemanticHistoryController alloc] init] autorelease];
     _semanticHistoryController.delegate = self;
     _coprocessCommand = nil;
@@ -166,25 +200,32 @@
 #pragma mark - Get Full Path
 
 - (void)testGetFullPathFailsOnNil {
-    XCTAssert([_semanticHistoryController getFullPath:nil
-                                  workingDirectory:@"/"
-                                        lineNumber:NULL] == nil);
+    XCTAssert([_semanticHistoryController cleanedUpPathFromPath:nil
+                                                         suffix:nil
+                                               workingDirectory:@"/"
+                                            extractedLineNumber:NULL
+                                                   columnNumber:NULL] == nil);
 }
 
 - (void)testGetFullPathFailsOnEmpty {
-    XCTAssert([_semanticHistoryController getFullPath:@""
-                                  workingDirectory:@"/"
-                                        lineNumber:NULL] == nil);
+    XCTAssert([_semanticHistoryController cleanedUpPathFromPath:@""
+                                                         suffix:nil
+                                               workingDirectory:@"/"
+                                            extractedLineNumber:NULL
+                                                   columnNumber:NULL] == nil);
 }
 
 - (void)testGetFullPathFindsExistingFileAtAbsolutePath {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kFilename = @"/path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.length == 0);
@@ -192,43 +233,54 @@
 
 - (void)testGetFullPathFindsExistingFileAtRelativePath {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kRelativeFilename = @"path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kAbsoluteFilename =
         [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
     [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kRelativeFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kRelativeFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kAbsoluteFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.length == 0);
 }
 
-- (void)testGetFullPathStripsParens {
-    NSString *lineNumber = nil;
-    static NSString *const kFilename = @"/path/to/file";
-    NSString *kFilenameWithParens = [NSString stringWithFormat:@"(%@)", kFilename];
-    static NSString *const kWorkingDirectory = @"/working/directory";
-    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kFilenameWithParens
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
-    NSString *expected = kFilename;
-    XCTAssert([expected isEqualToString:actual]);
-    XCTAssert(lineNumber.length == 0);
+- (void)testGetFullPathStripsDelimiters {
+    for (NSString *delimiters in @[ @"()", @"<>", @"[]", @"{}", @"''", @"\"\"" ]) {
+        NSString *lineNumber = nil;
+        NSString *columnNumber = nil;
+        static NSString *const kFilename = @"/path/to/file";
+        NSString *kFilenameWithParens = [NSString stringWithFormat:@"%C%@%C", [delimiters characterAtIndex:0], kFilename, [delimiters characterAtIndex:1]];
+        static NSString *const kWorkingDirectory = @"/working/directory";
+        [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+        NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithParens
+                                                                      suffix:nil
+                                                            workingDirectory:kWorkingDirectory
+                                                         extractedLineNumber:&lineNumber
+                                                                columnNumber:&columnNumber];
+        NSString *expected = kFilename;
+        assert([expected isEqualToString:actual]);
+        assert(lineNumber.length == 0);
+    }
 }
 
 - (void)testGetFullPathStripsTrailingPunctuation {
     for (NSString *punctuation in @[ @".", @")", @",", @":" ]) {
         NSString *lineNumber = nil;
+        NSString *columnNumber = nil;
         static NSString *const kFilename = @"/path/to/file";
         NSString *kFilenameWithParens = [kFilename stringByAppendingString:punctuation];
         static NSString *const kWorkingDirectory = @"/working/directory";
         [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-        NSString *actual = [_semanticHistoryController getFullPath:kFilenameWithParens
-                                                  workingDirectory:kWorkingDirectory
-                                                        lineNumber:&lineNumber];
+        NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithParens
+                                                                      suffix:nil
+                                                            workingDirectory:kWorkingDirectory
+                                                         extractedLineNumber:&lineNumber
+                                                                columnNumber:&columnNumber];
         NSString *expected = kFilename;
         XCTAssert([expected isEqualToString:actual]);
         XCTAssert(lineNumber.length == 0);
@@ -237,13 +289,16 @@
 
 - (void)testGetFullPathExtractsLineNumber {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kFilename = @"/path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@":123"];
     [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kFilenameWithLineNumber
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.integerValue == 123);
@@ -251,27 +306,156 @@
 
 - (void)testGetFullPathExtractsLineNumberAndIgnoresColumn {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kFilename = @"/path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@":123:456"];
     [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kFilenameWithLineNumber
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.integerValue == 123);
 }
 
+- (void)testGetFullPathExtractsAlternateLineNumberAndColumnSyntax {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@"[123, 456]"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber.integerValue == 456);
+}
+
+- (void)testGetFullPathExtractsAlternateLineNumberAndColumnSyntax_NoSpaceAfterComma {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@"[123,456]"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber.integerValue == 456);
+}
+
+- (void)testGetFullPathExtractsVeryVerboseLineNumberAndColumnSyntax {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilename
+                                                                  suffix:@"\", line 123, column 456"
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber.integerValue == 456);
+}
+
+- (void)testGetFullPathExtractsVeryVerboseLineNumberSyntax {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilename
+                                                                  suffix:@"\", line 123, in"
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber == nil);
+}
+
+- (void)testGetFullPathExtractsParenthesesLineNumberAndColumnSyntax {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@"(123, 456)"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:@""
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber.integerValue == 456);
+}
+
+- (void)testGetFullPathExtractsParenthesesLineNumberAndColumnSyntax_NoSpaceAfterComma {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    NSString *kFilenameWithLineNumber = [kFilename stringByAppendingString:@"(123,456)"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:@""
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+    XCTAssert(columnNumber.integerValue == 456);
+}
+
 - (void)testGetFullPathWithParensAndTrailingPunctuationExtractsLineNumber {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kFilename = @"/path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kFilenameWithLineNumber = [NSString stringWithFormat:@"(%@:123.)", kFilename];
     [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kFilenameWithLineNumber
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    NSString *expected = kFilename;
+    XCTAssert([expected isEqualToString:actual]);
+    XCTAssert(lineNumber.integerValue == 123);
+}
+
+- (void)testGetFullPathWithLineNumberInParensAfterFilename {
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    static NSString *const kFilename = @"/path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    NSString *kFilenameWithLineNumber = [NSString stringWithFormat:@"%@(123):", kFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilenameWithLineNumber
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.integerValue == 123);
@@ -279,23 +463,30 @@
 
 - (void)testGetFullPathFailsWithJustStrippedChars {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kWorkingDirectory = @"/working/directory";
     static NSString *const kFilename = @"(:123.)";
-    NSString *actual = [_semanticHistoryController getFullPath:kFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     XCTAssert(actual == nil);
 }
 
 - (void)testGetFullPathStandardizesDot {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kRelativeFilename = @"./path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kAbsoluteFilename = @"/working/directory/path/to/file";
     [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kRelativeFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    [_semanticHistoryController.fakeFileManager.files addObject:@"/working/directory/./path/to/file"];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kRelativeFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kAbsoluteFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.length == 0);
@@ -303,69 +494,113 @@
 
 - (void)testGetFullPathStandardizesDotDot {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kRelativeFilename = @"../path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory/blah";
     NSString *kAbsoluteFilename = @"/working/directory/path/to/file";
     [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kRelativeFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    [_semanticHistoryController.fakeFileManager.files addObject:@"/working/directory/blah/../path/to/file"];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kRelativeFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kAbsoluteFilename;
     XCTAssert([expected isEqualToString:actual]);
     XCTAssert(lineNumber.length == 0);
 }
 
-- (void)testGetFullPathStripsLeadingASlash {
-    NSString *lineNumber = nil;
-    static NSString *const kRelativeFilename = @"path/to/file";
-    static NSString *const kWorkingDirectory = @"/working/directory";
-    NSString *kAbsoluteFilename =
-        [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
-    [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:[@"a/" stringByAppendingString:kRelativeFilename]
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
-    NSString *expected = kAbsoluteFilename;
-    XCTAssert([expected isEqualToString:actual]);
-    XCTAssert(lineNumber.length == 0);
-}
-
-- (void)testGetFullPathStripsLeadingBSlash {
-    NSString *lineNumber = nil;
-    static NSString *const kRelativeFilename = @"path/to/file";
-    static NSString *const kWorkingDirectory = @"/working/directory";
-    NSString *kAbsoluteFilename =
-        [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
-    [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:[@"b/" stringByAppendingString:kRelativeFilename]
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
-    NSString *expected = kAbsoluteFilename;
-    XCTAssert([expected isEqualToString:actual]);
-    XCTAssert(lineNumber.length == 0);
+- (void)testGetFullPathStripsLeadingGitDiffPrefixes {
+    // Test all git diff prefixes: a/, b/, i/, w/, c/, o/
+    for (NSString *prefix in @[ @"a/", @"b/", @"i/", @"w/", @"c/", @"o/" ]) {
+        NSString *lineNumber = nil;
+        NSString *columnNumber = nil;
+        static NSString *const kRelativeFilename = @"path/to/file";
+        static NSString *const kWorkingDirectory = @"/working/directory";
+        NSString *kAbsoluteFilename =
+            [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+        [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
+        NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:[prefix stringByAppendingString:kRelativeFilename]
+                                                                      suffix:nil
+                                                            workingDirectory:kWorkingDirectory
+                                                         extractedLineNumber:&lineNumber
+                                                                columnNumber:&columnNumber];
+        NSString *expected = kAbsoluteFilename;
+        XCTAssert([expected isEqualToString:actual], @"Failed to strip prefix: %@", prefix);
+        XCTAssert(lineNumber.length == 0);
+    }
 }
 
 - (void)testGetFullPathRejectsNetworkPaths {
     NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
     static NSString *const kRelativeFilename = @"path/to/file";
     static NSString *const kWorkingDirectory = @"/working/directory";
     NSString *kAbsoluteFilename =
         [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
     [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
-    NSString *actual = [_semanticHistoryController getFullPath:kRelativeFilename
-                                              workingDirectory:kWorkingDirectory
-                                                    lineNumber:&lineNumber];
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:kRelativeFilename
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
     NSString *expected = kAbsoluteFilename;
     XCTAssert([expected isEqualToString:actual]);
 
     [_semanticHistoryController.fakeFileManager.networkMountPoints addObject:@"/working"];
-    actual = [_semanticHistoryController getFullPath:kRelativeFilename
-                                    workingDirectory:kWorkingDirectory
-                                          lineNumber:&lineNumber];
+    actual = [_semanticHistoryController cleanedUpPathFromPath:kRelativeFilename
+                                                        suffix:nil
+                                              workingDirectory:kWorkingDirectory
+                                           extractedLineNumber:&lineNumber
+                                                  columnNumber:&columnNumber];
     XCTAssert(actual == nil);
 }
 
+- (void)testRandomStuffAfterFileNameNotIdentifiedAsPartOfFile {
+    static NSString *const kRelativeFilename = @"path/to/file";
+    static NSString *const kWorkingDirectory = @"/working/directory";
+    static NSString *const possibleFilePart1 = @"path/to/file:12:34: blah blah blah";
+    static NSString *const possibleFilePart2 = @"raz boom bah";
+    [_semanticHistoryController.fakeFileManager.files addObject:kWorkingDirectory];
+    NSString *kAbsoluteFilename =
+    [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kAbsoluteFilename];
+    int prefixChars;
+    int suffixChars;
+    NSString *filename =
+    [_semanticHistoryController pathOfExistingFileFoundWithPrefix:possibleFilePart1
+                                                           suffix:possibleFilePart2
+                                                 workingDirectory:kWorkingDirectory
+                                             charsTakenFromPrefix:&prefixChars
+                                             charsTakenFromSuffix:&suffixChars
+                                                   trimWhitespace:NO];
+    XCTAssertNil(filename);
+}
+
 #pragma mark - Open Path
+
+- (BOOL)openPath:(NSString *)path
+   orRawFilename:(NSString *)rawFileName
+   substitutions:(NSDictionary *)substitutions
+      lineNumber:(NSString *)lineNumber
+    columnNumber:(NSString *)columnNumber {
+    __block BOOL result = NO;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_enter(group);
+    [_semanticHistoryController openPath:path
+                           orRawFilename:rawFileName
+                                fragment:nil
+                           substitutions:substitutions
+                                   scope:_scope
+                              lineNumber:lineNumber
+                            columnNumber:columnNumber completion:^(BOOL ok) {
+                                result = ok;
+                                dispatch_group_leave(group);
+                            }];
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    dispatch_release(group);
+    return result;
+}
 
 - (void)testOpenPathRawAction {
     _semanticHistoryController.prefs =
@@ -373,27 +608,44 @@
            kSemanticHistoryTextKey: @"\\1;\\2;\\3;\\4;\\5;\\(test)" };
 
     NSString *kStringThatIsNotAPath = @"Prefix X Suffix:1";
-    BOOL opened = [_semanticHistoryController openPath:kStringThatIsNotAPath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp",
-                                                          @"test": @"User Variable" }];
+    NSString *lineNumber, *columnNumber;
+    [_scope setValue:@"User Variable" forVariableNamed:@"test"];
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kStringThatIsNotAPath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kStringThatIsNotAPath
+                   substitutions:@{ kSemanticHistoryPathSubstitutionKey: [kStringThatIsNotAPath stringWithEscapedShellCharactersIncludingNewlines:YES],
+                                    kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp",
+                                    kSemanticHistoryLineNumberKey: @"",
+                                    kSemanticHistoryColumnNumberKey: @"" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     NSString *expectedScript = @"Prefix\\ X\\ Suffix:1;;Prefix;Suffix;/tmp;User Variable";
     NSString *actualScript = _semanticHistoryController.scriptArguments[1];
-    XCTAssert([expectedScript isEqualToString:actualScript]);
+    XCTAssertEqualObjects(expectedScript, actualScript);
 }
 
 - (void)testOpenPathFailsIfFileDoesNotExist {
     _semanticHistoryController.prefs =
         @{ kSemanticHistoryActionKey: kSemanticHistoryBestEditorAction };
     NSString *kStringThatIsNotAPath = @"Prefix X Suffix:1";
-    BOOL opened = [_semanticHistoryController openPath:kStringThatIsNotAPath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kStringThatIsNotAPath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kStringThatIsNotAPath
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(!opened);
 }
 
@@ -404,11 +656,18 @@
            kSemanticHistoryTextKey: kCommand};
     NSString *kExistingFileAbsolutePath = @"/file/that/exists";
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePath
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kCommand isEqualToString:_semanticHistoryController.scriptArguments[1]]);
 }
@@ -420,11 +679,18 @@
            kSemanticHistoryTextKey: kCommand};
     NSString *kExistingFileAbsolutePath = @"/file/that/exists";
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePath
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kCommand isEqualToString:_coprocessCommand]);
 }
@@ -436,33 +702,49 @@
            kSemanticHistoryTextKey: kCommand};
     NSString *kDirectory = @"/directory";
     [_semanticHistoryController.fakeFileManager.directories addObject:kDirectory];
-    BOOL opened = [_semanticHistoryController openPath:kDirectory
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kDirectory
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kDirectory
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/tmp" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
-    XCTAssert([kDirectory isEqualToString:_semanticHistoryController.openedFile]);
+    XCTAssertEqualObjects(kDirectory, _semanticHistoryController.openedFile);
 }
 
 - (void)testOpenPathOpensURLWithProperSubstitutions {
     _semanticHistoryController.prefs =
     @{ kSemanticHistoryActionKey: kSemanticHistoryUrlAction,
-       kSemanticHistoryTextKey: @"http://foo\\1?line=\\2&prefix=\\3&suffix=\\4&dir=\\5&uservar=\\(test)" };
+       kSemanticHistoryTextKey: @"http://foo/?pwd=\\1&line=\\2&prefix=\\3&suffix=\\4&dir=\\5&uservar=\\(test)" };
 
     NSString *kStringThatIsNotAPath = @"The Path:1";
     [_semanticHistoryController.fakeFileManager.files addObject:@"/The Path"];
-    BOOL opened = [_semanticHistoryController openPath:kStringThatIsNotAPath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"The Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"The Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/",
-                                                          @"test": @"User Variable" }];
+    NSString *lineNumber, *columnNumber;
+    [_scope setValue:@"User Variable" forVariableNamed:@"test"];
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kStringThatIsNotAPath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kStringThatIsNotAPath
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"The Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"The Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/",
+                                    kSemanticHistoryLineNumberKey: @"",
+                                    kSemanticHistoryColumnNumberKey: @"" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     NSURL *expectedURL =
-        [NSURL URLWithString:@"http://foo/The%20Path?line=1&prefix=The%20Prefix&suffix=The%20Suffix&dir=/&uservar=User%20Variable"];
+        [NSURL URLWithString:@"http://foo/?pwd=/The%20Path&line=1&prefix=The%20Prefix&suffix=The%20Suffix&dir=/&uservar=User%20Variable"];
     NSURL *actualURL = _semanticHistoryController.openedURL;
-    XCTAssert([expectedURL isEqual:actualURL]);
+    XCTAssertEqualObjects(expectedURL, actualURL);
     XCTAssert(!_semanticHistoryController.openedEditor);
 }
 
@@ -473,16 +755,53 @@
     NSString *kExistingFileAbsolutePath = @"/file/that/exists";
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = YES;
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePath
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePath
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePath
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
-    NSString *expectedUrlString = [NSString stringWithFormat:@"mvim://open?url=file://%@",
-                                   kExistingFileAbsolutePath];
-    XCTAssert([_semanticHistoryController.openedURL isEqualTo:[NSURL URLWithString:expectedUrlString]]);
+    NSString *expectedUrlString = [NSString stringWithFormat:@"mvim://open?url=file:%%2F%%2F%@",
+                                   [kExistingFileAbsolutePath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet alphanumericCharacterSet]]];
+    XCTAssertEqualObjects(_semanticHistoryController.openedURL, [NSURL URLWithString:expectedUrlString]);
     XCTAssert([_semanticHistoryController.openedEditor isEqualToString:kMacVimIdentifier]);
+}
+
+// Open a file with a line number in the default app, which happens to be MacVim.
+- (void)testOpenPathOpensTextFileInDefaultAppWithLineNumber {
+    _semanticHistoryController.prefs =
+      @{ kSemanticHistoryActionKey: kSemanticHistoryBestEditorAction };
+    NSString *kExistingFileAbsolutePath = @"/file/that/exists";
+    NSString *fileWithLineNumber = [kExistingFileAbsolutePath stringByAppendingString:@":12"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
+    _semanticHistoryController.defaultAppIsEditor = YES;
+    _semanticHistoryController.bundleIdForDefaultApp = kMacVimIdentifier;  // Act like macvim is the default for this kind of file
+
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:fileWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:fileWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
+    XCTAssert(opened);
+    NSString *expectedUrlString = @"mvim://open?url=file:///file/that/exists&line=12";
+    XCTAssertEqualObjects(_semanticHistoryController.openedURL,
+                          [NSURL URLWithString:expectedUrlString]);
+    XCTAssertEqualObjects(_semanticHistoryController.openedEditor,
+                          kMacVimIdentifier);
 }
 
 - (void)testOpenPathOpensTextFileInEditorWithLineNumberWhenEditorIsDefaultApp {
@@ -493,15 +812,21 @@
     NSString *fileWithLineNumber = [kExistingFileAbsolutePath stringByAppendingString:@":12"];
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = YES;
-    BOOL opened = [_semanticHistoryController openPath:fileWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:fileWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:fileWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
-    NSString *expectedUrlString = [NSString stringWithFormat:@"mvim://open?url=file://%@&line=12",
-                                   kExistingFileAbsolutePath];
-    XCTAssert([_semanticHistoryController.openedURL isEqualTo:[NSURL URLWithString:expectedUrlString]]);
+    NSString *expectedUrlString = @"mvim://open?url=file:///file/that/exists&line=12";
+    XCTAssertEqualObjects(_semanticHistoryController.openedURL, [NSURL URLWithString:expectedUrlString]);
     XCTAssert([_semanticHistoryController.openedEditor isEqualToString:kMacVimIdentifier]);
 }
 
@@ -513,11 +838,18 @@
     NSString *kExistingFileAbsolutePathWithLineNumber = [kExistingFileAbsolutePath stringByAppendingString:@":12"];
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = NO;
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePathWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kAtomIdentifier isEqualToString:_semanticHistoryController.launchedApp]);
     XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
@@ -532,13 +864,71 @@
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = NO;
     _semanticHistoryController.bundleIdForDefaultApp = kAtomIdentifier;  // Act like Atom is the default app for this file
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePathWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kAtomIdentifier isEqualToString:_semanticHistoryController.launchedApp]);
+    XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
+}
+
+- (void)testOpenPathOpensTextFileVSCodeEditor {
+    _semanticHistoryController.prefs =
+    @{ kSemanticHistoryActionKey: kSemanticHistoryEditorAction,
+       kSemanticHistoryEditorKey: kVSCodeIdentifier };
+    NSString *kExistingFileAbsolutePath = @"/file/that/exists";
+    NSString *kExistingFileAbsolutePathWithLineNumber = [kExistingFileAbsolutePath stringByAppendingString:@":12:11"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
+    _semanticHistoryController.defaultAppIsEditor = NO;
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
+    XCTAssert(opened);
+    XCTAssert([kVSCodeIdentifier isEqualToString:_semanticHistoryController.launchedApp]);
+    XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
+}
+
+- (void)testOpenPathOpensTextFileVSCodeEditorWhenDefaultAppForThisFile {
+    _semanticHistoryController.prefs =
+    @{ kSemanticHistoryActionKey: kSemanticHistoryEditorAction,
+       kSemanticHistoryEditorKey: kVSCodeIdentifier };
+    NSString *kExistingFileAbsolutePath = @"/file/that/exists";
+    NSString *kExistingFileAbsolutePathWithLineNumber = [kExistingFileAbsolutePath stringByAppendingString:@":12:11"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
+    _semanticHistoryController.defaultAppIsEditor = NO;
+    _semanticHistoryController.bundleIdForDefaultApp = kVSCodeIdentifier;  // Act like VSCode is the default app for this file
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
+    XCTAssert(opened);
+    XCTAssert([kVSCodeIdentifier isEqualToString:_semanticHistoryController.launchedApp]);
     XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
 }
 
@@ -550,13 +940,45 @@
     NSString *kExistingFileAbsolutePathWithLineNumber =[kExistingFileAbsolutePath stringByAppendingString:@":12"];
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = NO;
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePathWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kSublimeText2Identifier isEqualToString:_semanticHistoryController.launchedApp]);
+    XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
+}
+
+- (void)testOpenPathOpensTextFileSublimeText4Editor {
+    _semanticHistoryController.prefs =
+        @{ kSemanticHistoryActionKey: kSemanticHistoryEditorAction,
+           kSemanticHistoryEditorKey: kSublimeText4Identifier };
+    NSString *kExistingFileAbsolutePath = @"/file/that/exists";
+    NSString *kExistingFileAbsolutePathWithLineNumber =[kExistingFileAbsolutePath stringByAppendingString:@":12"];
+    [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
+    _semanticHistoryController.defaultAppIsEditor = NO;
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
+    XCTAssert(opened);
+    XCTAssert([kSublimeText4Identifier isEqualToString:_semanticHistoryController.launchedApp]);
     XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
 }
 
@@ -568,11 +990,18 @@
     NSString *kExistingFileAbsolutePathWithLineNumber =[kExistingFileAbsolutePath stringByAppendingString:@":12"];
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = NO;
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePathWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     XCTAssert([kSublimeText3Identifier isEqualToString:_semanticHistoryController.launchedApp]);
     XCTAssert([kExistingFileAbsolutePathWithLineNumber isEqualToString:_semanticHistoryController.launchedAppArg]);
@@ -589,17 +1018,24 @@
         [kExistingFileAbsolutePath stringByAppendingString:kLineNumber];
     [_semanticHistoryController.fakeFileManager.files addObject:kExistingFileAbsolutePath];
     _semanticHistoryController.defaultAppIsEditor = NO;
-    BOOL opened = [_semanticHistoryController openPath:kExistingFileAbsolutePathWithLineNumber
-                                      workingDirectory:@"/"
-                                         substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
-                                                          kSemanticHistorySuffixSubstitutionKey: @"Suffix",
-                                                          kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }];
+    NSString *lineNumber, *columnNumber;
+    BOOL opened = [self openPath:[_semanticHistoryController cleanedUpPathFromPath:kExistingFileAbsolutePathWithLineNumber
+                                                                            suffix:nil
+                                                                  workingDirectory:@"/"
+                                                               extractedLineNumber:&lineNumber
+                                                                      columnNumber:&columnNumber]
+                   orRawFilename:kExistingFileAbsolutePathWithLineNumber
+                   substitutions:@{ kSemanticHistoryPrefixSubstitutionKey: @"Prefix",
+                                    kSemanticHistorySuffixSubstitutionKey: @"Suffix",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/" }
+                      lineNumber:lineNumber
+                    columnNumber:columnNumber];
     XCTAssert(opened);
     NSString *urlString =
         [NSString stringWithFormat:@"%@://open?url=file://%@&line=%@",
-            expectedScheme, kExistingFileAbsolutePath, [kLineNumber substringFromIndex:1]];
+            expectedScheme, [kExistingFileAbsolutePath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]], [kLineNumber substringFromIndex:1]];
     NSURL *expectedURL = [NSURL URLWithString:urlString];
-    XCTAssert([_semanticHistoryController.openedURL isEqual:expectedURL]);
+    XCTAssertEqualObjects(_semanticHistoryController.openedURL, expectedURL);
     XCTAssert([_semanticHistoryController.openedEditor isEqual:editorId]);
 }
 
@@ -623,6 +1059,7 @@
 
 - (void)testPathOfExistingFile_Local {
     int numCharsFromPrefix;
+    int numCharsFromSuffix;
     NSString *kWorkingDirectory = @"/directory";
     NSString *kRelativeFilename = @"five six seven eight";
     NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -631,15 +1068,18 @@
     NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four five six "
                                                                             suffix:@"seven eight nine ten eleven"
                                                                   workingDirectory:kWorkingDirectory
-                                                              charsTakenFromPrefix:&numCharsFromPrefix];
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
     XCTAssert([kRelativeFilename isEqualToString:path]);
     XCTAssert(numCharsFromPrefix == [@"five six " length]);
 }
 
 // This test simulates what happens if you select a full line (including hard eol) and do Open Selection.
-// The prefix will end in whitespace (maybe) and a newline.
+// The prefix will end in whitespace (maybe) and a newline. This test uses whitespace trimming.
 - (void)testPathOfExistingFileIgnoringLeadingAndTrailingWhitespaceAndNewlines {
   int numCharsFromPrefix;
+  int numCharsFromSuffix;
   NSString *kWorkingDirectory = @"/directory";
   NSString *kRelativeFilename = @"five six seven eight";
   NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -648,13 +1088,17 @@
   NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"five six seven eight \r\n"
                                                                           suffix:@""
                                                                 workingDirectory:kWorkingDirectory
-                                                            charsTakenFromPrefix:&numCharsFromPrefix];
+                                                            charsTakenFromPrefix:&numCharsFromPrefix
+                                                            charsTakenFromSuffix:&numCharsFromSuffix
+                                                                  trimWhitespace:YES];
   XCTAssert([kRelativeFilename isEqualToString:path]);
-  XCTAssert(numCharsFromPrefix == [@"five six seven eight" length]);
+    XCTAssert(numCharsFromPrefix == [@"five six seven eight" length]);
+    XCTAssert(numCharsFromSuffix == [@"" length]);
 }
 
 - (void)testPathOfExistingFileRemovesParens {
     int numCharsFromPrefix;
+    int numCharsFromSuffix;
     NSString *kWorkingDirectory = @"/directory";
     NSString *kRelativeFilename = @"five six seven eight";
     NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -663,13 +1107,17 @@
     NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four (five six "
                                                                             suffix:@"seven eight) nine ten eleven"
                                                                   workingDirectory:kWorkingDirectory
-                                                              charsTakenFromPrefix:&numCharsFromPrefix];
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
     XCTAssert([@"five six seven eight" isEqualToString:path]);
     XCTAssert(numCharsFromPrefix == [@"five six " length]);
+    XCTAssert(numCharsFromSuffix == [@"seven eight" length]);
 }
 
 - (void)testPathOfExistingFileSupportsLineNumberAndColumnNumber {
     int numCharsFromPrefix;
+    int numCharsFromSuffix;
     NSString *kWorkingDirectory = @"/directory";
     NSString *kRelativeFilename = @"five six seven eight";
     NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -678,13 +1126,55 @@
     NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four five six "
                                                                             suffix:@"seven eight:123:456 nine ten eleven"
                                                                   workingDirectory:kWorkingDirectory
-                                                              charsTakenFromPrefix:&numCharsFromPrefix];
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
     XCTAssert([@"five six seven eight:123:456" isEqualToString:path]);
     XCTAssert(numCharsFromPrefix == [@"five six " length]);
+    XCTAssert(numCharsFromSuffix == [@"seven eight:123:456" length]);
+}
+
+- (void)testPathOfExistingFileSupportsLineNumberAndColumnNumberInParens {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"file.txt";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"file.txt(10"
+                                                                            suffix:@", 10)"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssert([@"file.txt(10, 10)" isEqualToString:path]);
+    XCTAssert(numCharsFromPrefix == [@"file.txt(10" length]);
+    XCTAssert(numCharsFromSuffix == [@", 10)" length]);
+}
+
+- (void)testPathOfExistingFileFindsColumnAndLineNumber {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"file.txt";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"file.txt"
+                                                                            suffix:@"(10, 10)"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssert([@"file.txt(10, 10)" isEqualToString:path]);
+    XCTAssert(numCharsFromPrefix == [@"file.txt" length]);
+    XCTAssert(numCharsFromSuffix == [@"(10, 10)" length]);
 }
 
 - (void)testPathOfExistingFileSupportsLineNumberAndColumnNumberAndParensAndNonspaceSeparators {
     int numCharsFromPrefix;
+    int numCharsFromSuffix;
     NSString *kWorkingDirectory = @"/directory";
     NSString *kRelativeFilename = @"five.six\tseven eight";
     NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -693,13 +1183,17 @@
     NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four (five.six\t"
                                                                             suffix:@"seven eight:123:456). nine ten eleven"
                                                                   workingDirectory:kWorkingDirectory
-                                                              charsTakenFromPrefix:&numCharsFromPrefix];
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
     XCTAssert([@"five.six\tseven eight:123:456" isEqualToString:path]);
     XCTAssert(numCharsFromPrefix == [@"five.six\t" length]);
+    XCTAssert(numCharsFromSuffix == [@"seven eight:123:456" length]);
 }
 
 - (void)testPathOfExistingFile_IgnoresFilesOnNetworkVolumes {
     int numCharsFromPrefix;
+    int numCharsFromSuffix;
     NSString *kWorkingDirectory = @"/directory";
     NSString *kRelativeFilename = @"five six seven eight";
     NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
@@ -709,14 +1203,140 @@
     NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four five six "
                                                                             suffix:@"seven eight nine ten eleven"
                                                                   workingDirectory:kWorkingDirectory
-                                                              charsTakenFromPrefix:&numCharsFromPrefix];
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
     XCTAssert(path == nil);
 }
+
+// Regression test for issue 3841.
+- (void)testLeadingWhitespaceIgnoredWithoutTrimming {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"test.txt";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"     "
+                                                                            suffix:@"  test.txt"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssert(path == nil);
+}
+
+// Regression test for issue 4927
+- (void)testPathOfExistingFile_EscapedCharacters {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"five six seven eight";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four five\\ six\\ "
+                                                                            suffix:@"seven\\ eight nine ten eleven"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssert([kRelativeFilename isEqualToString:path]);
+    XCTAssert(numCharsFromPrefix == [@"five\\ six\\ " length]);
+    XCTAssert(numCharsFromSuffix == [@"seven\\ eight" length]);
+}
+
+
+// Regression test for issue 7635
+- (void)testColonTextAfterLineNumber {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"file.rb";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"file"
+                                                                            suffix:@".rb:7:in `new`"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssertEqualObjects(@"file.rb:7", path);
+
+    NSString *lineNumber = nil;
+    NSString *columnNumber = nil;
+    NSString *actual = [_semanticHistoryController cleanedUpPathFromPath:path
+                                                                  suffix:nil
+                                                        workingDirectory:kWorkingDirectory
+                                                     extractedLineNumber:&lineNumber
+                                                            columnNumber:&columnNumber];
+    XCTAssertEqualObjects(actual, @"/directory/file.rb");
+    XCTAssertEqualObjects(lineNumber, @"7");
+    XCTAssertNil(columnNumber);
+}
+
+// Regression test for issue 7760
+- (void)testIssue7760 {
+    _semanticHistoryController.prefs =
+    @{ kSemanticHistoryActionKey: kSemanticHistoryCommandAction,
+       kSemanticHistoryTextKey: @"/bin/bash -l -c \"cd \\5 && env /usr/local/bin/atom \\1:2\"" };
+    [_semanticHistoryController.fakeFileManager.files addObject:@"/Users/kolbrich/Projects/quill/tmp/failure-sandbox_spec-246-screenshot.png"];
+    [_semanticHistoryController.fakeFileManager.directories addObject:@"/Users/kolbrich/Projects/quill"];
+
+    BOOL opened = [self openPath:@"/Users/kolbrich/Projects/quill/tmp/failure-sandbox_spec-246-screenshot.png"
+                   orRawFilename:@"/Users/kolbrich/Projects/quill/tmp/failure-sandbox_spec-246-screenshot.png"
+                   substitutions:@{ kSemanticHistoryPathSubstitutionKey: @"/Users/kolbrich/Projects/quill/tmp/failure-sandbox_spec-246-screenshot.png",
+                                    kSemanticHistoryPrefixSubstitutionKey: @"Saving\\ screenshot\\ to\\ /Users/kolbrich/Projects/quill/tmp/failure-",
+                                    kSemanticHistorySuffixSubstitutionKey: @"sandbox_spec-246-screenshot.png\\",
+                                    kSemanticHistoryWorkingDirectorySubstitutionKey: @"/Users/kolbrich/Projects/quill",
+                                    kSemanticHistoryLineNumberKey: @"",
+                                    kSemanticHistoryColumnNumberKey: @"" }
+                      lineNumber:@""
+                    columnNumber:@""];
+    XCTAssert(opened);
+    NSString *expectedScript = @"/bin/bash -l -c \"cd /Users/kolbrich/Projects/quill && env /usr/local/bin/atom /Users/kolbrich/Projects/quill/tmp/failure-sandbox_spec-246-screenshot.png:2\"";
+    NSString *actualScript = _semanticHistoryController.scriptArguments[1];
+    XCTAssertEqualObjects(expectedScript, actualScript);
+}
+
+#warning This test fails, but fixing it would change how raw actions work in edge cases where there is punctuation or brackets. I'll delay that until 3.1.
+#if 0
+- (void)testPathOfExistingFile_QuestionableSuffix {
+    int numCharsFromPrefix;
+    int numCharsFromSuffix;
+    NSString *kWorkingDirectory = @"/directory";
+    NSString *kRelativeFilename = @"five six seven eight";
+    NSString *kFilename = [kWorkingDirectory stringByAppendingPathComponent:kRelativeFilename];
+    [_semanticHistoryController.fakeFileManager.files addObject:kFilename];
+    [_semanticHistoryController.fakeFileManager.directories addObject:kWorkingDirectory];
+    NSString *path = [_semanticHistoryController pathOfExistingFileFoundWithPrefix:@"one two three four five six "
+                                                                            suffix:@"seven eight. nine ten eleven"
+                                                                  workingDirectory:kWorkingDirectory
+                                                              charsTakenFromPrefix:&numCharsFromPrefix
+                                                              charsTakenFromSuffix:&numCharsFromSuffix
+                                                                    trimWhitespace:NO];
+    XCTAssert([kRelativeFilename isEqualToString:path]);
+    XCTAssert(numCharsFromPrefix == [@"five six " length]);
+    XCTAssert(numCharsFromSuffix == [@"seven eight" length]);
+}
+#endif
 
 #pragma mark - iTermSemanticHistoryControllerDelegate
 
 - (void)semanticHistoryLaunchCoprocessWithCommand:(NSString *)command {
     _coprocessCommand = [[command copy] autorelease];
+}
+
+#pragma mark - iTermObject
+
+- (iTermBuiltInFunctions *)objectMethodRegistry {
+    return nil;
+}
+
+- (iTermVariableScope *)objectScope {
+    return nil;
 }
 
 @end

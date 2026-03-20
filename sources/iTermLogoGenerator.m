@@ -35,6 +35,7 @@ static NSMutableDictionary *gLogoCache;
 }
 
 - (NSImage *)generatedImage {
+    
     NSString *key = [self cacheKey];
     NSImage *cachedImage = gLogoCache[key];
     if (cachedImage) {
@@ -46,8 +47,8 @@ static NSMutableDictionary *gLogoCache;
     NSImage *image = [[[NSImage alloc] initWithSize:NSMakeSize(width, height)] autorelease];
     [image lockFocus];
 
-    NSImage *frame = [NSImage imageNamed:@"LogoFrame.png"];
-    NSImage *shadow = [NSImage imageNamed:@"LogoShadow.png"];
+    NSImage *frame = [NSImage it_imageNamed:@"LogoFrame.png" forClass:self.class];
+    NSImage *shadow = [NSImage it_imageNamed:@"LogoShadow.png" forClass:self.class];
 
     [_backgroundColor set];
     NSBezierPath *path = [NSBezierPath bezierPath];
@@ -57,7 +58,8 @@ static NSMutableDictionary *gLogoCache;
     [frame drawInRect:NSMakeRect(0, 0, width, height)];
     if (self.tabColor) {
         [[self.tabColor colorWithAlphaComponent:0.5] set];
-        NSRectFillUsingOperation(NSMakeRect(0, 0, width, height), NSCompositeSourceIn);
+        CGFloat tabHeight = 9;
+        NSRectFillUsingOperation(NSMakeRect(0, height - tabHeight, width, tabHeight), NSCompositingOperationSourceIn);
     }
 
     [shadow drawInRect:NSMakeRect(0, 0, width, height)];

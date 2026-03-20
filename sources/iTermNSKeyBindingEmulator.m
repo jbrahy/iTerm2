@@ -10,19 +10,18 @@
 // each keystroke.
 
 #import "iTermNSKeyBindingEmulator.h"
+
 #import "DebugLogging.h"
+#import "NSEvent+iTerm.h"
+
 #import <Carbon/Carbon.h>
 #import <wctype.h>
 
+
 @interface iTermNSKeyBindingEmulator ()
 
-// The key binding dictionary forms a tree. This is the root of the tree.
-// Entries map a "normalized key" (as produced by dictionaryKeyForCharacters:andFlags:) to either a
-// dictionary subtree, or to an array with a selector and its arguments.
-@property(nonatomic, retain) NSDictionary *rootDict;
-
 // The current subtree.
-@property(nonatomic, retain) NSDictionary *currentDict;
+@property(nonatomic, strong) NSDictionary *currentDict;
 
 @end
 
@@ -34,100 +33,125 @@ static struct {
     unichar c;
     NSUInteger mask;
 } gModifiers[] = {
-    { '^', NSControlKeyMask },
-    { '~', NSAlternateKeyMask },
-    { '$', NSShiftKeyMask },
-    { '#', NSNumericPadKeyMask },
-    { '@', NSCommandKeyMask }
+    { '^', NSEventModifierFlagControl },
+    { '~', NSEventModifierFlagOption },
+    { '$', NSEventModifierFlagShift },
+    { '#', NSEventModifierFlagNumericPad },
+    { '@', NSEventModifierFlagCommand }
 };
 
-@implementation iTermNSKeyBindingEmulator
-
-- (id)init
-{
-    self = [super init];
-    if (self) {
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
-                                                             NSUserDomainMask,
-                                                             YES);
-
-        if ([paths count]) {
-            NSString *bindPath =
-                [paths[0] stringByAppendingPathComponent:@"KeyBindings/DefaultKeyBinding.dict"];
-            NSDictionary *theDict = [NSDictionary dictionaryWithContentsOfFile:bindPath];
-            DLog(@"Loaded key bindings dictionary:\n%@", theDict);
-            _rootDict = [[self keyBindingDictionaryByNormalizingModifiersInKeys:theDict] retain];
-        }
-        _currentDict = [_rootDict retain];
-    }
-    return self;
+@implementation iTermNSKeyBindingEmulator {
+    // The key binding dictionary forms a tree. This is the root of the tree.
+    // Entries map a "normalized key" (as produced by dictionaryKeyForCharacters:andFlags:) to either a
+    // dictionary subtree, or to an array with a selector and its arguments.
+    NSDictionary *_root;
+    NSSet<NSString *> *_pointlessFirstKeystrokes;
+    NSMutableArray *_savedEvents;
+    NSSet<NSString *> *_allowedActions;  // If nil all are allowed
 }
 
-- (void)dealloc {
-    [_rootDict release];
-    [_currentDict release];
-    [super dealloc];
-}
-
-+ (instancetype)sharedInstance
-{
-    static dispatch_once_t once;
++ (instancetype)sharedInstance {
     static iTermNSKeyBindingEmulator *instance;
-    dispatch_once(&once, ^{
-        instance = [[iTermNSKeyBindingEmulator alloc] init];
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[self alloc] initWithFile:[self userFile] allowedActions:[NSSet setWithObject:@"insertText:"]];
     });
     return instance;
 }
 
-- (BOOL)handlesEvent:(NSEvent *)event
-{
-    if (!_rootDict) {
-        DLog(@"Short-circuit DefaultKeyBindings handling because no bindings are defined");
-        return NO;
-    }
-    DLog(@"Checking if default key bindings should handle %@", event);
-    NSArray *possibleKeys = [self dictionaryKeysForEvent:event];
-    if (possibleKeys.count == 0) {
-        self.currentDict = _rootDict;
-        DLog(@"Couldn't normalize event to key!");
-        NSLog(@"WARNING: Unexpected charactersIgnoringModifiers=%@ in event %@",
-              event.charactersIgnoringModifiers, event);
-        return NO;
-    }
-    NSObject *obj = nil;
-    NSString *selectedKey = nil;
-    for (NSString *theKey in possibleKeys) {
-        DLog(@"Looking up default key binding for: %@", theKey);
-        obj = [_currentDict objectForKey:theKey];
-        if (obj) {
-            DLog(@"  Found %@", obj);
-            selectedKey = theKey;
-            break;
-        }
-    }
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        // This is part of a multi-keystroke binding. Move down the tree.
-        self.currentDict = (NSDictionary *)obj;
-        DLog(@"Entered multi-keystroke binding with key: %@", selectedKey);
-        return YES;
-    }
++ (NSString *)userFile {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
+                                                         NSUserDomainMask,
+                                                         YES);
 
-    // Not (or no longer) in a multi-keystroke binding. Move to the root of the tree.
-    self.currentDict = _rootDict;
-    DLog(@"Default key binding is %@", obj);
-    
-    if (![obj isKindOfClass:[NSArray class]]) {
-        return NO;
+    if (![paths count]) {
+        AppendPinnedDebugLogMessage(@"NSKeyBindingEmulator", @"Failed to find library directory.");
+        return nil;
     }
-    
-    NSArray *theArray = (NSArray *)obj;
-    return ([theArray[0] isEqualToString:@"insertText:"]);
+    NSString *bindPath =
+        [paths[0] stringByAppendingPathComponent:@"KeyBindings/DefaultKeyBinding.dict"];
+    return bindPath;
 }
 
-#pragma mark - Private
 
-// Return the modifer mask for a special character.
-- (NSUInteger)flagsForSpecialCharacter:(unichar)c {
+- (instancetype)initWithFile:(NSString *)bindPath allowedActions:(NSSet<NSString *> *)allowedActions {
+    self = [super init];
+    if (self) {
+        _allowedActions = [allowedActions copy];
+        if (bindPath) {
+            [self loadKeyBindingsDictionary:bindPath allowedActions:allowedActions];
+        }
+    }
+    return self;
+}
+
+- (void)loadKeyBindingsDictionary:(NSString *)bindPath
+                   allowedActions:(NSSet<NSString *> *)allowedActions {
+    NSMutableSet<NSString *> *temp = [NSMutableSet set];
+    _root = [iTermNSKeyBindingEmulator keyBindingsDictionaryForFile:bindPath
+                                           pointlessFirstKeystrokes:temp
+                                                     allowedActions:allowedActions];
+    _currentDict = _root;
+    _pointlessFirstKeystrokes = temp;
+}
+
++ (NSDictionary *)keyBindingsDictionaryForFile:(NSString *)bindPath
+                      pointlessFirstKeystrokes:(NSMutableSet<NSString *> *)temp
+                                allowedActions:(NSSet<NSString *> *)allowedActions {
+    NSDictionary *theDict = [NSDictionary dictionaryWithContentsOfFile:bindPath];
+    AppendPinnedDebugLogMessage(@"NSKeyBindingEmulator", @"Load dictionary\n%@", theDict);
+    DLog(@"Loaded key bindings dictionary:\n%@", theDict);
+
+    NSDictionary *keyBindingDictionary = [self keyBindingDictionaryByNormalizingModifiersInKeys:theDict];
+    NSDictionary *result = [self keyBindingDictionaryByPruningUselessBranches:keyBindingDictionary
+                                                          pointlessKeystrokes:temp
+                                                               allowedActions:allowedActions];
+    return result;
+}
+
++ (NSDictionary *)keyBindingDictionaryByPruningUselessBranches:(NSDictionary *)node
+                                           pointlessKeystrokes:(NSMutableSet<NSString *> *)pointless
+                                                allowedActions:(NSSet<NSString *> *)allowedActions {
+    // Remove leafs that do not have an insertText: action.
+    // Recursively rune dictionary values, removing them if empty.
+    // Returns nil if the result would be an empty dictionary.
+    // This is useful because when you press a series of keys following a path
+    // through the key bindings that ultimately ends on a node that is not
+    // insertText:, we swallow all the keys leading up to the last one (but not
+    // the last one). That leads to issues like issue 4209. Since most key
+    // bindings are not insertText:, that's a lot of pointlessly throwing out
+    // user input. It brings us closer to Terminal, which no longer supports
+    // key bindings at all.
+    NSMutableDictionary *replacement = [NSMutableDictionary dictionary];
+    for (NSString *key in node) {
+        id value = node[key];
+        if ([value isKindOfClass:[NSDictionary class]]) {
+            value = [self keyBindingDictionaryByPruningUselessBranches:value
+                                                   pointlessKeystrokes:nil
+                                                        allowedActions:allowedActions];
+        } else if ([value isKindOfClass:[NSArray class]]) {
+            if (allowedActions && ![allowedActions containsObject:[(NSArray *)value firstObject]]) {
+                value = nil;
+            }
+        } else {
+            AppendPinnedDebugLogMessage(@"NSKeyBindingEmulator", @"Reject non-container leaf with key %@", key);
+            value = nil;
+        }
+        if (value) {
+            replacement[key] = value;
+        } else if ([node[key] isKindOfClass:[NSDictionary class]]) {
+            [pointless addObject:key];
+        }
+    }
+    if ([replacement count]) {
+        return replacement;
+    } else {
+        return nil;
+    }
+}
+
+// Return the modifier mask for a special character.
++ (NSUInteger)flagsForSpecialCharacter:(unichar)c {
     for (int i = 0; i < sizeof(gModifiers) / sizeof(gModifiers[0]); i++) {
         if (gModifiers[i].c == c) {
             return gModifiers[i].mask;
@@ -137,7 +161,7 @@ static struct {
 }
 
 // Returns the 0-based range of modifiers in a dictionary key such as "^A"
-- (NSRange)rangeOfModifiersInDictionaryKey:(NSString *)theKey {
++ (NSRange)rangeOfModifiersInDictionaryKey:(NSString *)theKey {
     if (theKey.length == 1) {
         // Special characters by themselves should be treated as keys.
         return NSMakeRange(0, 0);
@@ -155,7 +179,7 @@ static struct {
 }
 
 // Returns the modifier mask for a dictionary key such as "^A".
-- (NSUInteger)flagsInDictionaryKey:(NSString *)theKey {
++ (NSUInteger)flagsInDictionaryKey:(NSString *)theKey {
     NSRange flagsRange = [self rangeOfModifiersInDictionaryKey:theKey];
     if (flagsRange.location != 0 || flagsRange.length == 0) {
         return 0;
@@ -168,7 +192,7 @@ static struct {
 }
 
 // Unescapes characters. \x becomes x for any character x.
-- (NSString *)unescapedCharacters:(NSString *)input {
++ (NSString *)unescapedCharacters:(NSString *)input {
   NSMutableString *output = [NSMutableString string];
   BOOL esc = NO;
   for (int i = 0; i < input.length; i++) {
@@ -185,7 +209,7 @@ static struct {
 
 // Returns the characters in a dictionary key such as "^A" (that is, the stuff following the
 // special characters. Escaping backslashes in the character part are removed.
-- (NSString *)charactersInDictionaryKey:(NSString *)theKey {
++ (NSString *)charactersInDictionaryKey:(NSString *)theKey {
     NSRange flagsRange = [self rangeOfModifiersInDictionaryKey:theKey];
     if (flagsRange.location != 0) {
         return theKey;
@@ -197,7 +221,7 @@ static struct {
 
 // Returns YES if |s| consists of a single upper case ASCII character, such as 'A' (but not '0'
 // or 'a').
-- (BOOL)stringIsOneUpperCaseAsciiCharacter:(NSString *)s {
++ (BOOL)stringIsOneUpperCaseAsciiCharacter:(NSString *)s {
     return (s.length == 1 && iswascii([s characterAtIndex:0]) && iswupper([s characterAtIndex:0]));
 }
 
@@ -205,7 +229,7 @@ static struct {
 // characters in the prescribed order followed by [code %d] where %d is a decimal value for the
 // keystroke ignoring modifiers. There's a known bug here for nonascii keystrokes modified with
 // shift--I'm not quite sure how to safely lowercase them and I lack a non-US keyboard to test with.
-- (NSDictionary *)keyBindingDictionaryByNormalizingModifiersInKeys:(NSDictionary *)input {
++ (NSDictionary *)keyBindingDictionaryByNormalizingModifiersInKeys:(NSDictionary *)input {
     NSMutableDictionary *output = [NSMutableDictionary dictionary];
     for (NSString *key in input) {
         NSUInteger flags = [self flagsInDictionaryKey:key];
@@ -215,7 +239,7 @@ static struct {
             // parser as a capital A. This is probably not quite right (what about non-ascii
             // characters?).
             characters = [characters lowercaseString];
-            flags |= NSShiftKeyMask;
+            flags |= NSEventModifierFlagShift;
         }
         NSObject *value = input[key];
         NSString *normalizedKey = [self dictionaryKeyForCharacters:characters
@@ -234,7 +258,7 @@ static struct {
 }
 
 // Parse an octal value like \010. Returns YES on success and fills in *value.
-- (BOOL)parseOctal:(NSString *)s toValue:(int *)value {
++ (BOOL)parseOctal:(NSString *)s toValue:(int *)value {
     if (![s hasPrefix:@"\\0"]) {
         return NO;
     }
@@ -260,8 +284,7 @@ static struct {
 }
 
 // Converts the "characters" part of a key to its normalized value.
-- (NSString *)normalizedCharacters:(NSString *)input
-{
++ (NSString *)normalizedCharacters:(NSString *)input {
     const int kMaxOctalValue = 31;
     input = [input lowercaseString];
     int value;
@@ -273,14 +296,44 @@ static struct {
     return [NSString stringWithFormat:@"[code %d]", value];
 }
 
++ (UTF32Char)codeForNormalizedCharacters:(NSString *)characters {
+    NSScanner *scanner = [NSScanner scannerWithString:characters];
+    if (![scanner scanString:@"[code " intoString:nil]) {
+        return 0;
+    }
+    int result;
+    if (![scanner scanInt:&result]) {
+        return 0;
+    }
+    if (![scanner scanString:@"]" intoString:nil]) {
+        return 0;
+    }
+    if (!scanner.isAtEnd) {
+        return 0;
+    }
+    return result;
+}
+
++ (NSUInteger)normalizedFlags:(NSUInteger)nonNormalFlags forCharacters:(NSString *)characters {
+    const UTF32Char c = [self codeForNormalizedCharacters:characters];
+    switch (c) {
+        case NSUpArrowFunctionKey:
+        case NSDownArrowFunctionKey:
+        case NSLeftArrowFunctionKey:
+        case NSRightArrowFunctionKey:
+            return nonNormalFlags | NSEventModifierFlagNumericPad;
+    }
+    return nonNormalFlags;
+}
+
 // Returns a normalized key for characters and a modifier mask.
-- (NSString *)dictionaryKeyForCharacters:(NSString *)nonNormalChars
-                                andFlags:(NSUInteger)flags
-{
++ (NSString *)dictionaryKeyForCharacters:(NSString *)nonNormalChars
+                                andFlags:(NSUInteger)nonNormalFlags {
     NSString *characters = [self normalizedCharacters:nonNormalChars];
     if (!characters) {
         return nil;
     }
+    NSUInteger flags = [self normalizedFlags:nonNormalFlags forCharacters:characters];
     NSMutableString *theKey = [NSMutableString string];
     for (int i = 0; i < sizeof(gModifiers) / sizeof(gModifiers[0]); i++) {
         if ((gModifiers[i].mask & flags) == gModifiers[i].mask) {
@@ -291,22 +344,109 @@ static struct {
     return theKey;
 }
 
-// Return the unshifted character in a keypress event (e.g., . for shift+.i
+#pragma mark - Instance Methods
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _savedEvents = [[NSMutableArray alloc] init];
+    }
+    return self;
+}
+
+- (BOOL)handlesEvent:(NSEvent *)event
+         pointlessly:(BOOL *)pointlessly
+         extraEvents:(NSMutableArray *)extraEvents
+              action:(out NSString *__autoreleasing *)actionPtr {
+    *pointlessly = NO;
+    if (!_root && [_pointlessFirstKeystrokes count] == 0) {
+        DLog(@"Short-circuit DefaultKeyBindings handling because no bindings are defined and there are no pointless leaders");
+        [_savedEvents removeAllObjects];
+        return NO;
+    }
+    DLog(@"Checking if default key bindings should handle %@", event);
+    NSArray *possibleKeys = [self dictionaryKeysForEvent:event];
+    if (possibleKeys.count == 0) {
+        self.currentDict = _root;
+        DLog(@"Couldn't normalize event to key!");
+        DLog(@"WARNING: Unexpected charactersIgnoringModifiers=%@ in event %@",
+              event.charactersIgnoringModifiers, event);
+        [_savedEvents removeAllObjects];
+        return NO;
+    }
+    NSObject *obj = nil;
+    NSString *selectedKey = nil;
+    for (NSString *theKey in possibleKeys) {
+        DLog(@"Looking up default key binding for: %@", theKey);
+        obj = [_currentDict objectForKey:theKey];
+        if (obj) {
+            DLog(@"  Found %@", obj);
+            selectedKey = theKey;
+            break;
+        }
+    }
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        // This is part of a multi-keystroke binding. Move down the tree.
+        self.currentDict = (NSDictionary *)obj;
+        DLog(@"Entered multi-keystroke binding with key: %@", selectedKey);
+        [_savedEvents addObject:event];
+        return YES;
+    }
+
+    // Not (or no longer) in a multi-keystroke binding. Move to the root of the tree.
+    self.currentDict = _root;
+    DLog(@"Default key binding is %@", obj);
+
+    for (NSString *theKey in possibleKeys) {
+        if ([_pointlessFirstKeystrokes containsObject:theKey]) {
+            *pointlessly = YES;
+            DLog(@"Keystroke is pointless. Caller should not pass to handleEvent or interpretKeyEvents.");
+            return YES;
+        }
+    }
+
+    if (![obj isKindOfClass:[NSArray class]]) {
+        [extraEvents addObjectsFromArray:_savedEvents];
+        [_savedEvents removeAllObjects];
+        return NO;
+    }
+
+    NSArray *theArray = (NSArray *)obj;
+    const BOOL allowed = (_allowedActions == nil || [_allowedActions containsObject:theArray[0]]);
+    if (!allowed) {
+        [extraEvents addObjectsFromArray:_savedEvents];
+    }
+    [_savedEvents removeAllObjects];
+
+    if (actionPtr) {
+        *actionPtr = theArray[0];
+    }
+    return allowed;
+}
+
+#pragma mark - Private
+
+// Return the unshifted character in a keypress event (e.g., . for shift+.
 // (which produces ">") on a US keyboard). This may return nil.
-- (NSString *)charactersIgnoringAllModifiersInEvent:(NSEvent *)event
-{
+- (NSString *)charactersIgnoringAllModifiersInEvent:(NSEvent *)event {
+    DLog(@"Want to figure out what %@ would be without shift", event);
     CGKeyCode keyCode = [event keyCode];
+    DLog(@"keyCode=%@", @(keyCode));
     TISInputSourceRef keyboard = TISCopyCurrentKeyboardInputSource();
+    DLog(@"keyboard=%@", keyboard);
     CFDataRef layoutData = TISGetInputSourceProperty(keyboard,
                                                      kTISPropertyUnicodeKeyLayoutData);
     if (!layoutData) {
-        return nil;
+        DLog(@"No layout data found for keyboard");
+        return [self fallbackCharactersIgnoringAllModifiersInEvent:event];
     }
     const UCKeyboardLayout *keyboardLayout = (const UCKeyboardLayout *)CFDataGetBytePtr(layoutData);
     UInt32 deadKeyState = 0;
     UniChar unicodeString[4];
     UniCharCount actualStringLength;
 
+    DLog(@"Translating keycode");
+    const OSStatus status =
     UCKeyTranslate(keyboardLayout,
                    keyCode,
                    kUCKeyActionDisplay,
@@ -319,38 +459,64 @@ static struct {
                    unicodeString);
     CFRelease(keyboard);
 
-    NSString *theString = (NSString *)CFStringCreateWithCharacters(kCFAllocatorDefault,
-                                                                   unicodeString,
-                                                                   1);
-    return [theString autorelease];
+    if (status) {
+        DLog(@"UCKeyTranslate failed with %@", @(status));
+        return [self fallbackCharactersIgnoringAllModifiersInEvent:event];
+    }
+    NSString *theString = (__bridge_transfer NSString *)CFStringCreateWithCharacters(kCFAllocatorDefault,
+                                                                                     unicodeString,
+                                                                                     1);
+    DLog(@"Result is %@", theString);
+    return theString;
+}
+
+// This is probably a good enough replacement for the -charactersIgnoringAllModifiersInEvent but
+// it's basically impossible to test this change thoroughly so I'll leave it as a backup for systems
+// that don't have a keyboard layout. See issue 11611.
+- (NSString *)fallbackCharactersIgnoringAllModifiersInEvent:(NSEvent *)event {
+    DLog(@"Using fallback for %@", event);
+    // This uses the current keyboard.
+    CGEventRef cgEvent = CGEventCreateKeyboardEvent(NULL, event.keyCode, YES);
+    const CGEventFlags mask = (kCGEventFlagMaskHelp |
+                               kCGEventFlagMaskSecondaryFn |
+                               kCGEventFlagMaskNumericPad |
+                               kCGEventFlagMaskNonCoalesced);
+    const CGEventFlags modifiedFlags = CGEventGetFlags(event.CGEvent) & mask;
+    DLog(@"modified flags=%@", @(modifiedFlags));
+    CGEventSetFlags(cgEvent, modifiedFlags);
+    NSEvent *nsevent = [NSEvent eventWithCGEvent:cgEvent];
+    DLog(@"Resulting event is %@", nsevent);
+    NSString *chars = nsevent.charactersIgnoringModifiers;
+    CFRelease(cgEvent);
+    return chars;
 }
 
 // Returns all possible keys for an event, from most preferred to least.
 // If shift is not pressed, then only one key is possible (e.g., ^A)
 // If shift is pressed, then the result is [ "A", "$A" ] or [ "$<esc>" ] for chars that don't have
 // an uppercase version.
-- (NSArray *)dictionaryKeysForEvent:(NSEvent *)event
-{
+- (NSArray *)dictionaryKeysForEvent:(NSEvent *)event {
     NSString *charactersIgnoringModifiersExceptShift = [event charactersIgnoringModifiers];
-    NSUInteger flags = [event modifierFlags];
+    NSUInteger flags = [event it_modifierFlags];
     NSMutableArray *result = [NSMutableArray array];
 
     NSString *theKey =
-        [self dictionaryKeyForCharacters:charactersIgnoringModifiersExceptShift
-                                andFlags:flags];
+        [self.class dictionaryKeyForCharacters:charactersIgnoringModifiersExceptShift
+                                      andFlags:flags];
     if (theKey) {
         [result addObject:theKey];
     }
 
     NSString *charactersIgnoringAllModifiers = [self charactersIgnoringAllModifiersInEvent:event];
     if (charactersIgnoringAllModifiers &&
-        (flags & NSShiftKeyMask) &&
-        [charactersIgnoringAllModifiers isEqualToString:charactersIgnoringAllModifiers]) {
+        (flags & NSEventModifierFlagShift) &&
+        ![charactersIgnoringAllModifiers isEqualToString:charactersIgnoringModifiersExceptShift]) {
+        DLog(@"%@ != %@", charactersIgnoringAllModifiers, charactersIgnoringModifiersExceptShift);
         // The shifted version differs from the unshifted version (e.g., A vs a) so add
         // "A" since we already have "$A" ("A" is a lower priority than "$A").
         theKey =
-            [self dictionaryKeyForCharacters:charactersIgnoringModifiersExceptShift
-                                    andFlags:(flags & ~NSShiftKeyMask)];
+            [self.class dictionaryKeyForCharacters:charactersIgnoringModifiersExceptShift
+                                          andFlags:(flags & ~NSEventModifierFlagShift)];
         if (theKey) {
             [result addObject:theKey];
         }

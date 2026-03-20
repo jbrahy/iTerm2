@@ -9,50 +9,65 @@
 #import <Cocoa/Cocoa.h>
 #import "FutureMethods.h"
 
-@class VT100RemoteHost;
+@protocol VT100RemoteHostReading;
+@protocol iTermObject;
+@class iTermVariableScope;
 
-typedef enum {
+typedef NS_ENUM(NSInteger, ContextMenuActions) {
     kOpenFileContextMenuAction,
     kOpenUrlContextMenuAction,
     kRunCommandContextMenuAction,
     kRunCoprocessContextMenuAction,
-    kSendTextContextMenuAction
-} ContextMenuActions;
+    kSendTextContextMenuAction,
+    kRunCommandInWindowContextMenuAction,
+    kCopyContextMenuAction
+};
 
-@protocol ContextMenuActionPrefsDelegate
+@protocol ContextMenuActionPrefsDelegate <NSObject>
 
-- (void)contextMenuActionsChanged:(NSArray *)newActions;
+- (void)contextMenuActionsChanged:(NSArray *)newActions
+           useInterpolatedStrings:(BOOL)useInterpolatedStrings;
 
 @end
 
 
-@interface ContextMenuActionPrefsController : NSWindowController <NSWindowDelegate, NSTableViewDelegate, NSTableViewDataSource> {
-    IBOutlet NSTableView *tableView_;
-    IBOutlet NSTableColumn *titleColumn_;
-    IBOutlet NSTableColumn *actionColumn_;
-    IBOutlet NSTableColumn *parameterColumn_;
-    NSMutableArray *model_;
-    NSObject<ContextMenuActionPrefsDelegate> *delegate_;
-    BOOL hasSelection_;
-}
+@interface ContextMenuActionPrefsController : NSWindowController <
+    NSWindowDelegate, NSTableViewDelegate, NSTableViewDataSource>
 
-@property (nonatomic, assign) NSObject<ContextMenuActionPrefsDelegate> *delegate;
-@property (nonatomic, assign) BOOL hasSelection;
+@property (nonatomic, weak) id<ContextMenuActionPrefsDelegate> delegate;
+@property (nonatomic) BOOL hasSelection;
+@property (nonatomic) BOOL useInterpolatedStrings;
 
 + (ContextMenuActions)actionForActionDict:(NSDictionary *)dict;
 
 + (NSString *)titleForActionDict:(NSDictionary *)dict
            withCaptureComponents:(NSArray *)components
                 workingDirectory:(NSString *)workingDirectory
-                      remoteHost:(VT100RemoteHost *)remoteHost;
+                      remoteHost:(id<VT100RemoteHostReading>)remoteHost;
 
-+ (NSString *)parameterForActionDict:(NSDictionary *)dict
-               withCaptureComponents:(NSArray *)components
-                    workingDirectory:(NSString *)workingDirectory
-                          remoteHost:(VT100RemoteHost *)remoteHost;
+// Use this as the keys into the dictionary that get passed to the `dict` parameter of
+// computeParameterForActionDict:….
+extern NSString *iTermSmartSelectionActionContextKeyAction;
+extern NSString *iTermSmartSelectionActionContextKeyComponents;
+extern NSString *iTermSmartSelectionActionContextKeyWorkingDirectory;
+extern NSString *iTermSmartSelectionActionContextKeyRemoteHost;
+
++ (void)computeParameterForActionDict:(NSDictionary *)dict
+                withCaptureComponents:(NSArray *)components
+                     useInterpolation:(BOOL)useInterpolation
+                                scope:(iTermVariableScope *)scope
+                                owner:(id<iTermObject>)owner
+                           completion:(void (^)(NSString *parameter))completion;
+
+// May leave placeholders
++ (NSString *)computeParameterForActionDict:(NSDictionary *)dict
+                      withCaptureComponents:(NSArray *)components
+                           useInterpolation:(BOOL)useInterpolation
+                                      scope:(iTermVariableScope *)scope
+                                      owner:(id<iTermObject>)owner;
 
 - (IBAction)ok:(id)sender;
-- (void)setActions:(NSArray *)newActions;
+- (void)setActions:(NSArray *)newActions browser:(BOOL)browser;
 - (IBAction)add:(id)sender;
 - (IBAction)remove:(id)sender;
 

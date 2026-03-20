@@ -8,7 +8,74 @@
 
 #import "iTermInstantReplayWindowController.h"
 
+#import "DebugLogging.h"
+
 static const float kAlphaValue = 0.9;
+
+typedef NS_ENUM(NSUInteger, iTermInstantReplayState) {
+    iTermInstantReplayStateNormal,
+    iTermInstantReplayStateSetStart,
+    iTermInstantReplayStateSetEnd
+};
+
+@interface iTermInstantReplayEventsView : NSView
+@property (nonatomic, readonly) NSMutableArray<NSNumber *> *fractions;
+@property (nonatomic) CGFloat startFraction;
+@property (nonatomic) CGFloat endFraction;
+@end
+
+@implementation iTermInstantReplayEventsView
+
+- (void)awakeFromNib {
+    _fractions = [[NSMutableArray alloc] init];
+}
+
+- (CGFloat)xFromFraction:(CGFloat)fraction width:(CGFloat)width {
+    return round(fraction * (width - 1));
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    dirtyRect = NSIntersectionRect(dirtyRect, self.bounds);
+    [[NSColor clearColor] set];
+    NSRectFill(dirtyRect);
+
+    __block CGFloat lastX = -1;
+    const CGFloat width = self.frame.size.width;
+    const CGFloat height = self.frame.size.height;
+
+    if (_endFraction > _startFraction) {
+        CGFloat minX = [self xFromFraction:_startFraction width:width];
+        CGFloat maxX = [self xFromFraction:_endFraction width:width];
+        NSRect rect = NSMakeRect(minX, 0, maxX - minX, height);
+        [[[NSColor redColor] colorWithAlphaComponent:0.5] set];
+        NSRectFill(rect);
+    }
+
+    NSAppearanceName bestMatch = [self.effectiveAppearance bestMatchFromAppearancesWithNames:@[ NSAppearanceNameDarkAqua,
+                                                                                                NSAppearanceNameVibrantDark,
+                                                                                                NSAppearanceNameAqua,
+                                                                                                NSAppearanceNameVibrantLight ]];
+    if ([bestMatch isEqualToString:NSAppearanceNameDarkAqua] ||
+        [bestMatch isEqualToString:NSAppearanceNameVibrantDark]) {
+        [[[NSColor whiteColor] colorWithAlphaComponent:0.5] set];
+    } else {
+        [[[NSColor blackColor] colorWithAlphaComponent:0.5] set];
+    }
+    [_fractions enumerateObjectsUsingBlock:^(NSNumber * _Nonnull fractionNumber, NSUInteger idx, BOOL * _Nonnull stop) {
+        const double fraction = fractionNumber.doubleValue;
+        const CGFloat x = [self xFromFraction:fraction width:width];
+        if (x < NSMinX(dirtyRect) || x > NSMaxX(dirtyRect)) {
+            return;
+        }
+        if (x == lastX) {
+            return;
+        }
+        lastX = x;
+        NSRectFill(NSMakeRect(x, 0, 1, height));
+    }];
+}
+
+@end
 
 @implementation iTermInstantReplayPanel
 
@@ -23,11 +90,10 @@ static const float kAlphaValue = 0.9;
 }
 
 - (void)updateTrackingAreas {
-    
+
     if ([self window]) {
         if (_trackingArea) {
             [self removeTrackingArea:_trackingArea];
-            [_trackingArea release];
         }
         _trackingArea = [[NSTrackingArea alloc] initWithRect:[self visibleRect]
                                                      options:NSTrackingMouseMoved |NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways
@@ -53,9 +119,16 @@ static const float kAlphaValue = 0.9;
     IBOutlet NSTextField *_currentTimeLabel;
     IBOutlet NSTextField *_earliestTimeLabel;
     IBOutlet NSTextField *_latestTimeLabel;
+    IBOutlet NSButton *_firstButton;
+    IBOutlet NSButton *_secondButton;
+    IBOutlet iTermInstantReplayEventsView *_eventsView;
+    iTermInstantReplayState _state;
+    long long _start;
+    double _span;
+    long long _firstTimestamp;
 }
 
-- (id)init {
+- (instancetype)init {
     return [super initWithWindowNibName:@"InstantReplay"];
 }
 
@@ -71,33 +144,119 @@ static const float kAlphaValue = 0.9;
     [_delegate replaceSyntheticActiveSessionWithLiveSessionIfNeeded];
 }
 
+- (void)setDelegate:(id<iTermInstantReplayDelegate>)delegate {
+    _delegate = delegate;
+    if (delegate && [self isWindowLoaded]) {
+        [self updateEvents];
+    }
+}
+
+- (void)awakeFromNib {
+    if (_delegate) {
+        [self updateEvents];
+    }
+}
+
+- (void)updateEvents {
+    assert(_eventsView);
+    assert(_delegate);
+    _firstTimestamp = [_delegate instantReplayFirstTimestamp];
+    long long lastTimestamp = [_delegate instantReplayLastTimestamp];
+    _span = lastTimestamp - _firstTimestamp;
+    [_eventsView.fractions removeAllObjects];
+    for (long long i = _firstTimestamp; i > 0 && i <= lastTimestamp; i = [_delegate instantReplayTimestampAfter:i]) {
+        NSNumber *fraction = @((i - _firstTimestamp) / _span);
+        [_eventsView.fractions addObject:fraction];
+    }
+    [_eventsView setNeedsDisplay:YES];
+}
+
 - (IBAction)sliderMoved:(id)sender {
-    [self retain];
+    __typeof(self) me = self;
     [_delegate instantReplaySeekTo:[sender floatValue]];
-    [self updateInstantReplayView];
-    [self release];
+    [me updateInstantReplayView];
 }
 
 - (void)keyDown:(NSEvent *)theEvent {
     NSString *characters = [theEvent characters];
-    [self retain];  // In case delegate releases us
+    __typeof(self) me = self;
     if ([characters length]) {
         unichar code = [characters characterAtIndex:0];
         switch (code) {
             case NSLeftArrowFunctionKey:
                 [_delegate instantReplayStep:-1];
-                [self updateInstantReplayView];
+                [me updateInstantReplayView];
                 break;
             case NSRightArrowFunctionKey:
                 [_delegate instantReplayStep:1];
-                [self updateInstantReplayView];
+                [me updateInstantReplayView];
                 break;
             case 27:
                 [_delegate replaceSyntheticActiveSessionWithLiveSessionIfNeeded];
                 break;
         }
     }
-    [self release];
+}
+
+- (IBAction)exportButton:(id)sender {
+    switch (_state) {
+        case iTermInstantReplayStateNormal:
+            [self setState:iTermInstantReplayStateSetStart byCancelling:NO];
+            break;
+        case iTermInstantReplayStateSetStart:
+            [self setState:iTermInstantReplayStateSetEnd byCancelling:NO];
+            break;
+        case iTermInstantReplayStateSetEnd:
+            [self setState:iTermInstantReplayStateNormal byCancelling:NO];
+    }
+}
+
+- (IBAction)cancelButton:(id)sender {
+    [self setState:iTermInstantReplayStateNormal byCancelling:YES];
+}
+
+- (void)setState:(iTermInstantReplayState)destinationState byCancelling:(BOOL)cancel {
+    if (_state == iTermInstantReplayStateSetStart &&
+               destinationState == iTermInstantReplayStateSetEnd) {
+        _start = [_delegate instantReplayCurrentTimestamp];
+        _eventsView.startFraction = (_start - _firstTimestamp) / _span;
+        _eventsView.endFraction = _eventsView.startFraction;
+    } else if (destinationState == iTermInstantReplayStateNormal &&
+               _state == iTermInstantReplayStateSetEnd &&
+               !cancel) {
+        long long end = [_delegate instantReplayCurrentTimestamp];
+        if (end < _start) {
+            DLog(@"Beep: end is before start");
+            NSBeep();
+            return;
+        }
+        [_delegate instantReplayExportFrom:_start to:end];
+    }
+    _state = destinationState;
+    switch (_state) {
+        case iTermInstantReplayStateNormal:
+            _firstButton.title = @"Export…";
+            _eventsView.startFraction = 0;
+            _eventsView.endFraction = 0;
+            [_eventsView setNeedsDisplay:YES];
+            _secondButton.hidden = YES;
+            break;
+        case iTermInstantReplayStateSetStart:
+            _firstButton.title = @"Set Start";
+            _slider.floatValue = 0;
+            [_delegate instantReplaySeekTo:0];
+            [self updateInstantReplayView];
+            _secondButton.title = @"Cancel";
+            _secondButton.hidden = NO;
+            break;
+        case iTermInstantReplayStateSetEnd:
+            _firstButton.title = @"Set End";
+            _slider.floatValue = 1;
+            [_delegate instantReplaySeekTo:1];
+            [self updateInstantReplayView];
+            _secondButton.title = @"Cancel";
+            _secondButton.hidden = NO;
+    }
 }
 
 #pragma mark - NSWindowController
@@ -125,7 +284,7 @@ static const float kAlphaValue = 0.9;
     struct tm nowParts;
     localtime_r(&startTime, &startTimeParts);
     localtime_r(&now, &nowParts);
-    NSDateFormatter* fmt = [[[NSDateFormatter alloc] init] autorelease];
+    NSDateFormatter* fmt = [[NSDateFormatter alloc] init];
     [fmt setDateStyle:NSDateFormatterShortStyle];
     if (startTimeParts.tm_year != nowParts.tm_year ||
         startTimeParts.tm_yday != nowParts.tm_yday) {
@@ -176,6 +335,10 @@ static const float kAlphaValue = 0.9;
                                _slider.frame.origin.y,
                                _slider.frame.origin.x + _slider.frame.size.width - newXOrigin,
                                _slider.frame.size.height);
+    NSRect frame = _eventsView.frame;
+    frame.origin.x = newXOrigin + 5;
+    frame.size.width = _slider.frame.size.width - 10;
+    _eventsView.frame = frame;
 
     // Align the currentTime with the slider
     NSRect f = [_currentTimeLabel frame];
@@ -188,8 +351,14 @@ static const float kAlphaValue = 0.9;
         newX = sf.origin.x;
     }
     [_currentTimeLabel setFrameOrigin:NSMakePoint(newX, f.origin.y)];
-    
+
     [self.window.contentView setNeedsDisplay:YES];
+
+    if (_state == iTermInstantReplayStateSetEnd) {
+        _eventsView.endFraction = (timestamp - _firstTimestamp) / _span;
+        [_eventsView setNeedsDisplay:YES];
+
+    }
 }
 
 @end

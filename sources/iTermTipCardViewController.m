@@ -8,6 +8,7 @@
 
 #import "iTermTipCardViewController.h"
 
+#import "iTerm2SharedARC-Swift.h"
 #import "iTermFlippedView.h"
 #import "iTermTipCardActionButton.h"
 #import "NSColor+iTerm.h"
@@ -16,11 +17,12 @@
 
 #import <QuartzCore/QuartzCore.h>
 
-static const CGFloat kButtonSideInset = 1;
-static const CGFloat kContainerSideInset = 4;
+static const CGFloat kButtonSideInset = 0;
+static const CGFloat kContainerSideInset = 0;
 static const CGFloat kContainerTopBorder = 1;
 static const CGFloat kContainerBottomBorder = 1;
 static const CGFloat kBodySideMargin = 10;
+static const CGFloat kBodyBottomMargin = 6;
 static const CGFloat kCardBottomMargin = 8;
 static const CGFloat kCardTopMargin = 2;
 static const CGFloat kMarginBetweenTextAndButtons = 0;
@@ -66,17 +68,29 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
 - (void)awakeFromNib {
     [self flipSubviews];
     [self setWantsLayer:YES];
-    self.layer.backgroundColor = [[NSColor whiteColor] CGColor];
+    self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
     self.layer.borderColor = [[NSColor colorWithCalibratedWhite:0.65 alpha:1] CGColor];
     self.layer.borderWidth = 1;
 }
 
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
+}
+
+- (void)updateLayer {
+    self.layer.backgroundColor = [[NSColor controlBackgroundColor] CGColor];
+}
+
+@end
+
+@interface iTermTipCardViewController()<DraggableNSBoxDelegate>
 @end
 
 @implementation iTermTipCardViewController {
     IBOutlet NSTextField *_title;
     IBOutlet NSTextField *_body;
-    IBOutlet NSBox *_titleBox;
+    IBOutlet DraggableNSBox *_titleBox;
     IBOutlet iTermTipCardContainerView *_container;
 
     // A view that sits above the buttons and below the body content to hide staged buttons.
@@ -92,13 +106,37 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
 - (void)dealloc {
     [_actionButtons release];
     [_fakeBottomDivider release];
+    [_didDrag release];
+    [_willDrag release];
     [super dealloc];
+}
+
++ (NSColor *)tipTextColor {
+    return [NSColor colorWithName:@"iTermTipTextColor" dynamicProvider:^NSColor * _Nonnull(NSAppearance *appearance) {
+        if (appearance.it_isDark) {
+            return [NSColor colorWithWhite:0.77 alpha:1];
+        } else {
+            return [NSColor colorWithWhite:0.23 alpha:1];
+        }
+    }];
+}
+- (void)awakeFromNib {
+    _titleBox.delegate = self;
+    _body.textColor = [iTermTipCardViewController tipTextColor];
+    _title.accessibilityElement = YES;
+    _title.accessibilityLabel = @"Tip title";
+
+    _body.accessibilityElement = YES;
+    _body.accessibilityRole = NSAccessibilityStaticTextRole;
+    _body.accessibilityLabel = @"Tip content";
+
+    self.view.accessibilityChildren = @[ _body ];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    _coverView.color = [NSColor whiteColor];
+    _coverView.color = [NSColor controlBackgroundColor];
 
     // Add a shadow to the card.
     NSShadow *dropShadow = [[[NSShadow alloc] init] autorelease];
@@ -120,6 +158,7 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
 
 - (void)setTitleString:(NSString *)titleString {
     _title.stringValue = titleString;
+    NSAccessibilityPostNotification(_title, NSAccessibilityValueChangedNotification);
 }
 
 - (void)setColor:(NSColor *)color {
@@ -128,19 +167,28 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
 
 - (void)setBodyText:(NSString *)body {
     NSMutableAttributedString *attributedString =
-        [[[NSMutableAttributedString alloc] init] autorelease];
+    [[[NSMutableAttributedString alloc] init] autorelease];
 
+    NSMutableParagraphStyle *bigTextParagraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    [bigTextParagraphStyle setParagraphSpacing:4];
     NSDictionary *bigTextAttributes =
-        @{ NSFontAttributeName: [NSFont fontWithName:@"Helvetica Neue Light" size:16],
-           NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.2 alpha:1] };
+    @{ NSFontAttributeName: [NSFont fontWithName:@"Helvetica Neue Light" size:16] ?: [NSFont systemFontOfSize:16],
+       NSForegroundColorAttributeName: [iTermTipCardViewController tipTextColor],
+       NSParagraphStyleAttributeName: bigTextParagraphStyle };
 
     NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
-    [paragraphStyle setAlignment:NSRightTextAlignment];
-
+    [paragraphStyle setAlignment:NSTextAlignmentRight];
+    NSColor *sigColor = [NSColor colorWithName:@"iTermTipSignatureColor" dynamicProvider:^NSColor * _Nonnull(NSAppearance *appearance) {
+        if (appearance.it_isDark) {
+            return [NSColor colorWithCalibratedWhite:0.7 alpha:1];
+        } else {
+            return [NSColor colorWithCalibratedWhite:0.3 alpha:1];
+        }
+    }];
     NSDictionary *signatureAttributes =
-        @{ NSFontAttributeName: [NSFont fontWithName:@"Helvetica Neue Light Italic" size:12],
-           NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.3 alpha:1],
-           NSParagraphStyleAttributeName: paragraphStyle};
+    @{ NSFontAttributeName: [NSFont fontWithName:@"Helvetica Neue Light Italic" size:12] ?: [NSFont systemFontOfSize:12],
+       NSForegroundColorAttributeName: sigColor,
+       NSParagraphStyleAttributeName: paragraphStyle};
 
     [attributedString iterm_appendString:body
                           withAttributes:bigTextAttributes];
@@ -150,9 +198,18 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
                           withAttributes:signatureAttributes];
 
     _body.attributedStringValue = attributedString;
+    _body.accessibilityValue = attributedString;
+    NSAccessibilityPostNotification(_body, NSAccessibilityValueChangedNotification);
 }
 
 - (iTermTipCardActionButton *)addActionWithTitle:(NSString *)title
+                                            icon:(NSImage *)image
+                                           block:(void (^)(id card))block {
+    return [self addActionWithTitle:title shortcut:nil icon:image block:block];
+}
+
+- (iTermTipCardActionButton *)addActionWithTitle:(NSString *)title
+                                        shortcut:(NSString *)shortcut
                                             icon:(NSImage *)image
                                            block:(void (^)(id card))block {
     if (!_actionButtons) {
@@ -162,6 +219,7 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
     iTermTipCardActionButton *button = [[[iTermTipCardActionButton alloc] initWithFrame:NSMakeRect(kButtonSideInset, 0, _container.bounds.size.width - kButtonSideInset * 2, 0)] autorelease];
     button.autoresizingMask = 0;
     button.title = title;
+    button.shortcut = shortcut;
     [button setIcon:image];
     button.block = block;
     button.target = self;
@@ -172,6 +230,7 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
     // Place later buttons under earlier buttons and all under body so they can animate in and out.
     [_container addSubview:button positioned:NSWindowBelow relativeTo:viewToPlaceButtonBelow];
 
+    self.view.accessibilityChildren = [@[ _body ] arrayByAddingObjectsFromArray:_actionButtons];
     return button;
 }
 
@@ -236,6 +295,7 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
     // Compute size of body text.
     NSRect bodyFrame = _body.frame;
     bodyFrame.size = [_body sizeThatFits:NSMakeSize(containerWidth - kBodySideMargin * 2, CGFLOAT_MAX)];
+    bodyFrame.size.height += kBodyBottomMargin;
     bodyFrame.origin.x = kBodySideMargin;
     bodyFrame.origin.y = NSMaxY(_titleBox.frame) + kMarginBetweenTitleAndBody;
 
@@ -414,7 +474,10 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
 - (void)buttonPressed:(id)sender {
     iTermTipCardActionButton *button = sender;
     if (button.block) {
+        _currentlySelectedButton = button;
+        [[self retain] autorelease];
         button.block(self);
+        _currentlySelectedButton = nil;
     }
 }
 
@@ -440,7 +503,7 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
               originalCardFrame:(NSRect)originalCardFrame
              postAnimationFrame:(NSRect)postAnimationFrame
                  superviewWidth:(CGFloat)superviewWidth
-                          block:(void (^)())block {
+                          block:(void (^)(void))block {
     [CATransaction begin];
     [self retain];
     [CATransaction setCompletionBlock:^{
@@ -507,6 +570,18 @@ static const CGFloat kMarginBetweenTitleAndBody = 8;
     // apparently has to be doen after the transaction is committed so this goes here.
     for (iTermTipCardActionButton *button in buttonsToCollapse) {
         [button setCollapsed:YES];
+    }
+}
+
+- (void)draggableBoxDidDrag:(DraggableNSBox *)box {
+    if (self.didDrag) {
+        self.didDrag();
+    }
+}
+
+- (void)draggableBoxWillDrag:(DraggableNSBox *)box {
+    if (self.willDrag) {
+        self.willDrag();
     }
 }
 

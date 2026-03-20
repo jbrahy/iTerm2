@@ -8,15 +8,16 @@
 
 #import "iTermFontPanel.h"
 
+@interface iTermFontPanel()<NSFontChanging>
+@end
+
 @implementation iTermFontPanel
 
-+ (void)makeDefault
-{
++ (void)makeDefault {
     [NSFontManager setFontPanelFactory:[iTermFontPanel class]];
 }
 
-- (NSUInteger)validModesForFontPanel:(NSFontPanel *)fontPanel
-{
+- (NSFontPanelModeMask)validModesForFontPanel:(NSFontPanel *)fontPanel {
     return kValidModesForFontPanel;
 }
 

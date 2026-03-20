@@ -8,11 +8,7 @@
 #import <Cocoa/Cocoa.h>
 
 
-@interface TSVDocument : NSObject {
-    NSMutableArray *columns_;
-    NSMutableArray *records_;
-    NSMutableDictionary *map_;
-}
+@interface TSVDocument : NSObject
 
 @property (nonatomic, retain) NSMutableArray *columns;
 @property (nonatomic, readonly) NSMutableArray *records;
@@ -23,12 +19,14 @@
 
 @interface TSVParser : NSObject
 
-+ (TSVDocument *)documentFromString:(NSString *)string withFields:(NSArray *)fields;
++ (TSVDocument *)documentFromString:(NSString *)string
+                         withFields:(NSArray *)fields
+                   workAroundTabBug:(BOOL)workAroundTabBug;
 
 @end
 
 @interface NSString (TSV)
 
-- (TSVDocument *)tsvDocumentWithFields:(NSArray *)fields;
+- (TSVDocument *)tsvDocumentWithFields:(NSArray *)fields workAroundTabBug:(BOOL)workAroundTabBug;
 
 @end

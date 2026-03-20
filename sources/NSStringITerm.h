@@ -2,7 +2,7 @@
 //
 //  NSStringJTerminal.h
 //
-//  Additional fucntion to NSString Class by Category
+//  Additional function to NSString Class by Category
 //  2001.11.13 by Y.Hanahara
 //  2002.05.18 by Kiichi Kusama
 /*
@@ -34,6 +34,17 @@
 
 #import <Cocoa/Cocoa.h>
 
+#import "iTermOrderedDictionary.h"
+#import "iTermTuple.h"
+#import "iTermUnicodeNormalization.h"
+#import "NSString+CommonAdditions.h"
+#import "VT100GridTypes.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+@class iTermVariableScope;
+@class ScreenCharArray;
+
 // This is the standard unicode replacement character for when input couldn't
 // be parsed properly but we need to render something there.
 #define UNICODE_REPLACEMENT_CHAR 0xfffd
@@ -47,31 +58,49 @@
 // negative: abs(this many) bytes are illegal, should be replaced by one
 //   single replacement symbol.
 // zero: Unfinished sequence, input needs to grow.
+#ifndef __cplusplus
 int decode_utf8_char(const unsigned char * restrict datap,
                      int datalen,
                      int * restrict result);
+#endif
 
 @interface NSString (iTerm)
 
+@property (nonatomic, readonly) NSString *jsonEncodedString;
+
 + (NSString *)stringWithInt:(int)num;
 + (BOOL)isDoubleWidthCharacter:(int)unicode
-        ambiguousIsDoubleWidth:(BOOL)ambiguousIsDoubleWidth;
+        ambiguousIsDoubleWidth:(BOOL)ambiguousIsDoubleWidth
+                unicodeVersion:(NSInteger)version
+                fullWidthFlags:(BOOL)fullWidthFlags;
++ (NSString *)stringWithLongCharacter:(UTF32Char)longCharacter;
 
 // Returns the current string on the pasteboard (if any).
-+ (NSString *)stringFromPasteboard;
++ (NSString * _Nullable)stringFromPasteboard;
 
 // Returns the set of characters that should be backslash-escaped.
 + (NSString *)shellEscapableCharacters;
 
 // Returns the number of lines in a string.
 - (NSUInteger)numberOfLines;
-- (NSString *)stringWithEscapedShellCharacters;
+// May use single quotes by user preference. Only safe to use with user's default shell.
+- (NSString *)stringWithEscapedShellCharactersIncludingNewlines:(BOOL)includingNewlines;
+
+// foo' -> $'foo\\x27'
+// Suitable for use as bash -c 'escaped string'
+- (NSString *)stringEscapedForBash;
+
+// foo -> "foo"
+// foo"bar -> "foo\"bar"
+// foo\nbar -> "foo\\nbar"
+- (NSString *)quotedStringForPaste;
+
+// Always uses backslash.
+- (NSString *)stringWithBackslashEscapedShellCharactersIncludingNewlines:(BOOL)includingNewlines;
+- (NSString *)stringWithEscapedShellCharactersExceptTabAndNewline;
 
 // Replaces tab with ^V + tab.
 - (NSString *)stringWithShellEscapedTabs;
-
-// Properly escapes chars for a string to stick in a URL query param.
-- (NSString*)stringWithPercentEscape;
 
 // Convert DOS-style and \n newlines to \r newlines.
 - (NSString*)stringWithLinefeedNewlines;
@@ -80,21 +109,24 @@ int decode_utf8_char(const unsigned char * restrict datap,
 //   foo ~root "~"    bar\ baz   ""
 // and returns an array like:
 //   @[ @"foo", @"/Users/root", @"~", @"bar baz", @"" ]
-- (NSArray *)componentsInShellCommand;
+- (NSArray<NSString *> *)componentsInShellCommand;
 
 // Same as componentsInShellCommand but \r, \n, \t, and \a map to the letters r, n, t, and a,
 // not to controls.
-- (NSArray *)componentsBySplittingProfileListQuery;
+- (NSArray<NSString *> *)componentsBySplittingProfileListQuery;
 
 - (NSString *)stringByReplacingBackreference:(int)n withString:(NSString *)s;
 - (NSString *)stringByReplacingEscapedChar:(unichar)echar withString:(NSString *)s;
 - (NSString *)stringByReplacingEscapedHexValuesWithChars;
 - (NSString *)stringByEscapingQuotes;
+- (NSString *)stringByReplacingCommonlyEscapedCharactersWithControls;
+- (NSString *)stringByEscapingControlCharactersAndBackslash;
 
 // Convert a string of hex values (an even number of [0-9A-Fa-f]) into data.
 - (NSData *)dataFromHexValues;
+- (NSData * _Nullable)dataFromWhitespaceDelimitedHexValues;
 
-// Always returns a non-null vaule, but it may contain replacement chars for
+// Always returns a non-null value, but it may contain replacement chars for
 // malformed utf-8 sequences.
 - (NSString *)initWithUTF8DataIgnoringErrors:(NSData *)data;
 
@@ -106,13 +138,17 @@ int decode_utf8_char(const unsigned char * restrict datap,
 
 - (NSString *)stringByTrimmingTrailingCharactersFromCharacterSet:(NSCharacterSet *)charset;
 
-- (NSString *)stringByBase64DecodingStringWithEncoding:(NSStringEncoding)encoding;
+- (NSString * _Nullable)stringByBase64DecodingStringWithEncoding:(NSStringEncoding)encoding;
+- (NSString * _Nullable)base64EncodedWithEncoding:(NSStringEncoding)encoding;
+- (BOOL)mayBeBase64Encoded;
 
 // Returns a substring of contiguous characters only from a given character set
 // including some character in the middle of the target.
 - (NSString *)substringIncludingOffset:(int)offset
                       fromCharacterSet:(NSCharacterSet *)charSet
-                  charsTakenFromPrefix:(int*)charsTakenFromPrefixPtr;
+                  charsTakenFromPrefix:(int * _Nullable)charsTakenFromPrefixPtr;
+
+- (NSArray *)componentsBySplittingStringWithQuotesAndBackslashEscaping:(NSDictionary *)escapes;
 
 // This handles a few kinds of URLs, after trimming whitespace from the beginning and end:
 // 1. Well formed strings like:
@@ -134,17 +170,18 @@ int decode_utf8_char(const unsigned char * restrict datap,
 //    "*http://example.com" -> "http://example.com"
 - (NSRange)rangeOfURLInString;
 
-- (NSString *)stringByEscapingForURL;
-- (NSString *)stringByCapitalizingFirstLetter;
+- (NSString *)stringByRemovingSuffix:(NSString *)suffix;
+- (NSString *)stringByRemovingPrefix:(NSString *)prefix;
 
-- (NSString *)hexOrDecimalConversionHelp;
+- (NSString *)stringByCapitalizingFirstLetter;
 
 // String starts with http:// or https://. Used to tell if a custom prefs
 // location is a path or URL.
 - (BOOL)stringIsUrlLike;
 
 // Fonts are encoded as strings when stored in a profile. This returns the font for such a string.
-- (NSFont *)fontValue;
+// When ligatures are enabled then stylistic alternatives are allowed.
+- (NSFont *)fontValueWithLigaturesEnabled:(BOOL)ligaturesEnabled;
 
 // Returns a 2-hex-chars-per-char encoding of this string.
 - (NSString *)hexEncodedString;
@@ -152,7 +189,7 @@ int decode_utf8_char(const unsigned char * restrict datap,
 
 // Compose/Decompose UTF8 string without normalization
 
-// This is better than -precomposedStringWithCanonicalMapping because it preserves compatability
+// This is better than -precomposedStringWithCanonicalMapping because it preserves compatibility
 // equivalence. It's most relevant when two canonically equivalent characters have different widths
 // (one is half-width while the other is ambiguous width). The difference is in the following
 // ranges: 2000-2FFF, F900-FAFF, 2F800-2FAFF. See issue 2872.
@@ -161,17 +198,18 @@ int decode_utf8_char(const unsigned char * restrict datap,
 
 // Expands a vim-style string's special characters
 - (NSString *)stringByExpandingVimSpecialCharacters;
+- (NSString *)stringByExpandingTildeInPathPreservingSlash;
 
 // How tall is this string when rendered within a fixed width?
-- (CGFloat)heightWithAttributes:(NSDictionary *)attributes constrainedToWidth:(CGFloat)maxWidth;
+- (CGFloat)heightWithAttributes:(NSDictionary * _Nullable)attributes
+             constrainedToWidth:(CGFloat)maxWidth;
 
-- (NSArray *)keyValuePair;
+- (iTermTuple<NSString *, NSString *> * _Nullable)keyValuePair;
+- (iTermTuple<NSString *, NSString *> * _Nullable)it_stringBySplittingOnFirstSubstring:(NSString *)substring;
 
-- (NSString *)stringByReplacingVariableReferencesWithVariables:(NSDictionary *)vars;
-- (NSString *)stringByPerformingSubstitutions:(NSDictionary *)substituions;
+- (NSIndexSet *)indicesOfCharactersInSet:(NSCharacterSet *)characterSet;
 
-// Does self contain |substring|?
-- (BOOL)containsString:(NSString *)substring;
+- (NSString *)stringByPerformingSubstitutions:(NSDictionary *)substitutions;
 
 // Returns self repeated |n| times.
 - (NSString *)stringRepeatedTimes:(int)n;
@@ -182,14 +220,14 @@ int decode_utf8_char(const unsigned char * restrict datap,
 // Turns a string like fooBar into FooBar.
 - (NSString *)stringWithFirstLetterCapitalized;
 
-// Given a bitmask of modifiers like NSAlternateKeyMask, return a string indicating those modifiers.
+// Given a bitmask of modifiers like NSEventModifierFlagOption, return a string indicating those modifiers.
 + (NSString *)stringForModifiersWithMask:(NSUInteger)mask;
 
 // Returns a fresh UUID
 + (NSString *)uuid;
 
 // Characters in [0, 31] and 127 get replaced with ?
-- (NSString *)stringByReplacingControlCharsWithQuestionMark;
+- (NSString *)stringByReplacingControlCharactersWithCaretLetter;
 
 // Returns the set of $$VARIABLES$$ in the string.
 - (NSSet *)doubleDollarVariables;
@@ -197,7 +235,185 @@ int decode_utf8_char(const unsigned char * restrict datap,
 // Returns whether |self| is matched by |glob|, which is a shell-like glob pattern (e.g., *x or
 // x*y).
 // Only * is supported as a wildcard.
-- (BOOL)stringMatchesCaseInsensitiveGlobPattern:(NSString *)glob;
+- (BOOL)stringMatchesGlobPattern:(NSString *)glob caseSensitive:(BOOL)caseSensitive;
+
+// Call |block| for each composed character in the string. If it is a single base character or a
+// high surrogate, then |simple| will be valid and |complex| will be nil. Otherwise, |complex| will
+// be non-nil.
+- (void)enumerateComposedCharacters:(void (^)(NSRange range,
+                                              unichar simple,
+                                              NSString *complexString,
+                                              BOOL *stop))block;
+
+- (NSString *)firstComposedCharacter:(NSString * _Nullable * _Nullable)rest;
+- (NSString *)lastComposedCharacter;
+- (NSInteger)numberOfComposedCharacters;
+- (NSString * _Nullable)byTruncatingComposedCharactersInCenter:(NSInteger)count;
+
+// It is safe to modify, delete, or insert characters in `range` within `block`.
+- (void)reverseEnumerateSubstringsEqualTo:(NSString *)query
+                                    block:(void (^ NS_NOESCAPE)(NSRange range))block;
+
+- (NSUInteger)iterm_unsignedIntegerValue;
+
+// Returns modified attributes for drawing self fitting size within one point.
+- (NSDictionary *)attributesUsingFont:(NSFont *)font
+                          fittingSize:(NSSize)size
+                           attributes:(NSDictionary * _Nullable)attributes;
+
+// Removes trailing zeros from a floating point value, leaving at most one.
+// 1.0000 -> 1.0
+// 1.0010 -> 1.001
+- (NSString *)stringByCompactingFloatingPointString;
+
+// A fast, non-crypto-quality hash.
+- (NSUInteger)hashWithDJB2;
+
+- (UTF32Char)firstCharacter;
+// Is this a phrase enclosed in quotation marks?
+- (BOOL)isInQuotationMarks;
+
+// Stick punctuation (should be a comma or a period) at the end, placing it
+// before the terminal quotation mark if needed.
+- (NSString *)stringByInsertingTerminalPunctuation:(NSString *)punctuation;
+
+// Escape special characters and wrap result in quotes.
+- (NSString *)stringByEscapingForJSON;
+
+// Escape special characters.
+- (NSString *)stringByEscapingForXML;
+
+// Escape tmux special characters.
+- (NSString *)stringByEscapingForTmux;
+
+// Returns an array of numbers giving code points for each character in the string. Surrogate pairs
+// get combined. Combining marks do not.
+- (NSArray<NSNumber *> *)codePoints;
+
+// Returns a person's surname.
+- (NSString *)surname;
+
+// Contains only digits?
+- (BOOL)isNumeric;
+// Accepts strings like .2, 1, 1.2
+- (BOOL)isNonnegativeFractionalNumber;
+
+// First character is a digit?
+- (BOOL)startsWithDigit;
+
+// Modify the range's endpoint to not sever a surrogate pair.
+- (NSRange)makeRangeSafe:(NSRange)range;
+
+- (NSString *)stringByMakingControlCharactersToPrintable;
+
+// These methods work on 10.13 with strings that include newlines, and are consistent with each other.
+// The built in NSString API ignores everything from the first newline on for computing bounds.
+- (NSRect)it_boundingRectWithSize:(NSSize)bounds
+                       attributes:(NSDictionary * _Nullable)attributes
+                        truncated:(BOOL *)truncated;
+- (void)it_drawInRect:(CGRect)rect
+           attributes:(NSDictionary * _Nullable)attributes;
+- (void)it_drawInRect:(CGRect)rect
+           attributes:(NSDictionary * _Nullable)attributes
+                alpha:(CGFloat)alpha;
+
+- (BOOL)startsWithEmoji;
++ (NSString *)it_formatBytes:(double)bytes;
++ (NSString *)it_formatBytesCompact:(double)bytes;
+
+// For a string like
+// lll\(eee(eee,eee,"eee","\\"","ee\(EE())"))ll
+// Invoke block for each literal and expression. In the above example there would be three calls:
+// lll                                      YES
+// eee(eee,eee,"eee","\\"","ee\(EE())")     NO
+// ll                                       YES
+- (void)enumerateSwiftySubstrings:(void (^)(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop))block;
+- (NSString *)it_stringByExpandingBackslashEscapedCharacters;
++ (NSString *)sparkWithHeight:(double)fraction;
+- (id)it_jsonSafeValue;
+- (NSInteger)it_numberOfLines;
+
+// Empty strings are prefixes of all strings.
+- (BOOL)it_hasPrefix:(NSString *)prefix;
+
+// If this is a 2+ part version number, return a 2 part version number. Otherwise, nil.
+- (NSString * _Nullable)it_twoPartVersionNumber;
+- (NSString *)stringByEscapingForSandboxLiteral;
+- (NSString *)stringByKeepingLastCharacters:(NSInteger)count;
+- (NSString *)stringByTrimmingOrphanedSurrogates;
+
+- (NSString *)stringByAppendingVariablePathComponent:(NSString *)component;
+- (NSString *)stringByAppendingPathComponents:(NSArray<NSString *> *)pathComponents;
+- (NSArray<NSString *> *)it_normalizedTokens;
+- (double)it_localizedDoubleValue;
+- (NSString * _Nullable)it_contentHash;
+- (NSString *)it_unescapedTmuxWindowName;
+- (NSString *)it_substringToIndex:(NSInteger)index;
+- (NSString *)it_escapedForRegex;
+- (NSString * _Nullable)it_compressedString;
+
+// Use this in #!/usr/bin/env -S "%@"
+// Important! It assumes you put the value in double quotes. Amusingly, the man page for env
+// trolls you by explaining that single-quoted values only need to escape ' and \ but neglects to
+// mention that other characters simple won't work at all, escaped or otherwise.
+- (NSString *)it_escapedForEnv;
+
+// Perform substitutions in order.
+- (NSString *)stringByPerformingOrderedSubstitutions:(iTermOrderedDictionary<NSString *, NSString *> *)substitutions;
+- (NSString *)stringByReplacingCharactersAtIndices:(NSIndexSet *)indexSet
+                               withStringFromBlock:(NSString *(^ NS_NOESCAPE)(void))replacement;
+- (BOOL)caseInsensitiveHasPrefix:(NSString *)prefix;
+- (NSString *)removingHTMLFromTabTitleIfNeeded;
+// nil if this is not scannable as an integer.
+- (NSNumber *)integerNumber;
+- (BOOL)getHashColorRed:(unsigned int *)red green:(unsigned int *)green blue:(unsigned int *)blue;
+- (BOOL)interpolatedStringContainsNonliteral;
+- (NSString *)it_stringByAppendingCharacter:(unichar)theChar;
+- (NSDictionary<NSString *, NSString *> *)it_keyValuePairsSeparatedBy:(NSString *)separator;
+
+- (UTF32Char)longCharacterAtIndex:(NSInteger)i;
+- (NSString *)stringByReplacingBaseCharacterWith:(UTF32Char)base;
+
+@property (nonatomic, readonly) BOOL beginsWithWhitespace;
+@property (nonatomic, readonly) BOOL endsWithWhitespace;
+
+- (NSArray<NSString *> *)lastWords:(NSUInteger)count;
+@property (nonatomic, readonly) NSString *firstNonEmptyLine;
+- (NSString *)truncatedToLength:(NSInteger)maxLength ellipsis:(NSString *)ellipsis;
+- (NSString * _Nullable)sanitizedUsername;
+- (NSString * _Nullable)sanitizedHostname;
+- (NSString *)sanitizedCommand;
+- (NSString *)removingInvisibles;
+- (NSString *)stringByReplacingUnicodeSpacesWithASCIISpace;
+- (NSString *)stringByEscapingForRegex;
+
+- (NSString *)chunkedWithLineLength:(NSInteger)length
+                          separator:(NSString *)separator;
+
+- (BOOL)parseKittyUnicodePlaceholder:(out VT100GridCoord * _Nullable)coord
+                            imageMSB:(out int * _Nullable)imageMSB;
+
+@property (nonatomic, readonly) NSString *it_sanitized;
+@property(nonatomic, readonly) NSString *stringEnclosedInMarkdownInlineCode;
+
+@property (nonatomic, readonly) NSString *it_stem;
+- (NSString *)it_normalized;
+
+// `foo "bar baz" blotz "punk"` -> (["bar baz", "punk", "foo blotz")
+
+- (iTermTuple<NSArray<NSString *> *, NSString *> *)queryBySplittingLiteralPhrases;
+- (ScreenCharArray *)asScreenCharArray;
+
+// Returns the number of terminal cells this string occupies when rendered.
+- (int)screenWidthWithAmbiguousIsDoubleWidth:(BOOL)ambiguousIsDoubleWidth
+                              unicodeVersion:(NSInteger)unicodeVersion
+                               normalization:(iTermUnicodeNormalization)normalization;
+
++ (NSData *)dataForHexCodes:(NSString *)codes;
+- (NSString *)it_pasteBracketed;
+
+// Returns tuples of (substring, subsequent separator). The last tuple may have a nil subsequent separator.
+- (NSArray<iTermTuple<NSString *, NSString *> *> *)it_componentsSeparatedByAnyStringIn:(NSArray<NSString *> *)separators;
 
 @end
 
@@ -206,9 +422,17 @@ int decode_utf8_char(const unsigned char * restrict datap,
 - (void)trimTrailingWhitespace;
 
 // Puts backslashes before characters in shellEscapableCharacters.
-- (void)escapeShellCharacters;
+- (void)escapeShellCharactersIncludingNewlines:(BOOL)includingNewlines;
+- (void)escapeShellCharactersWithBackslashIncludingNewlines:(BOOL)includingNewlines;
+- (void)escapeShellCharactersExceptTabAndNewline;
+
+// foo' -> $'foo\\x27'
+- (void)escapeShellCharactersForBash;
 
 // Convenience method to append a single character.
 - (void)appendCharacter:(unichar)c;
+- (void)escapeCharacters:(NSString *)charsToEscape;
 
 @end
+
+NS_ASSUME_NONNULL_END

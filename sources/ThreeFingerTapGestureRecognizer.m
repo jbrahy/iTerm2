@@ -14,12 +14,13 @@
     int numTouches_;
     NSTimeInterval firstTouchTime_;  // Time since ref date of transition from 0 to >0 touches
     NSTimeInterval threeTouchTime_;  // Time since ref date of transition from <3 to 3 touches
-    __weak NSView *target_;
+    NSView *target_;  // weak reference
     SEL selector_;
     BOOL fired_;  // True if we just faked a three-finger click and future mouse clicks should be ignored.
+    BOOL _moved;
 }
 
-- (id)initWithTarget:(NSView *)target selector:(SEL)selector {
+- (instancetype)initWithTarget:(NSView *)target selector:(SEL)selector {
     self = [super init];
     if (self) {
         target_ = target;
@@ -32,21 +33,22 @@
     firstTouchTime_ = 0;
 }
 
-- (void)touchesBeganWithEvent:(NSEvent *)ev
-{
+- (void)touchesBeganWithEvent:(NSEvent *)ev {
     fired_ = NO;
     DLog(@"fired->NO");
-    int touches = [[ev touchesMatchingPhase:NSTouchPhaseBegan | NSTouchPhaseStationary
-                                     inView:target_] count];
+    const int touches = [[ev touchesMatchingPhase:NSTouchPhaseBegan | NSTouchPhaseStationary
+                                           inView:target_] count];
+    DLog(@"touches=%@, numTouches_=%@", @(touches), @(numTouches_));
     if (numTouches_ == 0 && touches > 0) {
         DLog(@"Set first touch time");
+        _moved = NO;
         firstTouchTime_ = [NSDate timeIntervalSinceReferenceDate];
     }
     if (numTouches_ < 3 && touches == 3) {
         DLog(@"Set three touch time");
         threeTouchTime_ = [NSDate timeIntervalSinceReferenceDate];
     }
-    if (numTouches_ > 3) {
+    if (touches > 3) {
         DLog(@"Too many touches!");
         // Not possible to be a three finger tap if more than three fingers were down at any point.
         [self cancel];
@@ -59,21 +61,25 @@
    numTouches_ = touches;
 }
 
-- (void)touchesEndedWithEvent:(NSEvent *)ev
-{
+- (void)touchesMovedWithEvent:(NSEvent *)event {
+    _moved = YES;
+}
+
+- (void)touchesEndedWithEvent:(NSEvent *)ev {
     numTouches_ = [[ev touchesMatchingPhase:NSTouchPhaseStationary
                                            inView:target_] count];
     const NSTimeInterval maxTimeForSimulatedThreeFingerTap = 1;
     if (numTouches_ == 0 &&
         firstTouchTime_ &&
         threeTouchTime_ &&
+        !_moved &&
         [NSDate timeIntervalSinceReferenceDate] - firstTouchTime_ < maxTimeForSimulatedThreeFingerTap) {
         DLog(@"Fake a three finger click");
         [target_ performSelector:selector_ withObject:ev];
         DLog(@"fired->YES");
         fired_ = YES;
     }
-    if (numTouches_ == 0) {
+    if (numTouches_ == 0 || (firstTouchTime_ && !threeTouchTime_)) {
         DLog(@"Reset first/three times");
         firstTouchTime_ = 0;
         threeTouchTime_ = 0;
@@ -115,6 +121,16 @@
     DLog(@"mouse down");
     [self cancel];
     return fired_;
+}
+
+- (void)mouseDragged {
+    DLog(@"mouse dragged");
+    [self cancel];
+}
+
+- (void)scrollWheel {
+    DLog(@"scroll wheel");
+    [self cancel];
 }
 
 - (BOOL)mouseUp:(NSEvent*)event

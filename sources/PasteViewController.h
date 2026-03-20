@@ -10,28 +10,28 @@
 
 @class PasteContext;
 
-@protocol PasteViewControllerDelegate
+@protocol PasteViewControllerDelegate <NSObject>
 
 - (void)pasteViewControllerDidCancel;
 
 @end
 
-@interface PasteViewController : NSViewController {
-    IBOutlet NSProgressIndicator *progressIndicator_;
-    int totalLength_;
-    int remainingLength_;
-    PasteContext *pasteContext_;
-    __weak id<PasteViewControllerDelegate> delegate_;
-}
+@interface PasteViewController : NSViewController
 
-@property (nonatomic, assign) __weak id<PasteViewControllerDelegate> delegate;
+@property(nonatomic, assign) id<PasteViewControllerDelegate> delegate;
+@property(nonatomic, assign) int remainingLength;
+@property(nonatomic, readonly) BOOL mini;
 
-- (id)initWithContext:(PasteContext *)pasteContext_
-               length:(int)length;
+- (instancetype)initWithContext:(PasteContext *)pasteContext_
+                         length:(int)length
+                           mini:(BOOL)mini NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
+- (instancetype)initWithNibName:(NSNibName)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil NS_UNAVAILABLE;
+- (instancetype)init NS_UNAVAILABLE;
 
 - (IBAction)cancel:(id)sender;
-- (void)setRemainingLength:(int)remainingLength;
 - (void)updateFrame;
-- (void)close;
+- (void)closeWithCompletion:(void (^)(void))completion;
+- (void)updateLabelColor;
 
 @end

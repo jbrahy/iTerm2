@@ -95,7 +95,7 @@
     XCTAssert([token.string isEqualToString:@"title"]);
 }
 
-- (void)testFailOnEmbddedEscapePlusCharacter {
+- (void)testFailOnEmbeddedEscapePlusCharacter {
     VT100Token *token = [self tokenForDataWithFormat:@"%c]0;ti%cc", VT100CC_ESC, VT100CC_ESC];
     XCTAssert(token->type == VT100_NOTSUPPORT);
 }
@@ -328,6 +328,11 @@
     VT100Token *token = [self tokenForDataWithFormat:@"%c];Foo%c", VT100CC_ESC, VT100CC_BEL];
     XCTAssert(token->type == XTERMCC_WINICON_TITLE);
     XCTAssert([token.string isEqualToString:@"Foo"]);
+}
+
+- (void)testOverflow {
+    VT100Token *token = [self tokenForDataWithFormat:@"%c]9999999999;foo%c", VT100CC_ESC, VT100CC_BEL];
+    XCTAssertEqual(VT100_NOTSUPPORT, token->type);
 }
 
 @end

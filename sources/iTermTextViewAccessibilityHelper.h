@@ -13,10 +13,11 @@
 // accessibility, as opposed to actual line numbers in the terminal. The 0th
 // line in accessibility space may be the Nth line in the terminal, or the 0th
 // line if accessibility space is at least as large as the terminal.
-@protocol iTermTextViewAccessibilityHelperDelegate
+@protocol iTermTextViewAccessibilityHelperDelegate <NSObject>
 
 // Return an array of characters for a line number in accessibility-space.
-- (screen_char_t *)accessibilityHelperLineAtIndex:(int)accessibilityIndex;
+- (const screen_char_t *)accessibilityHelperLineAtIndex:(int)accessibilityIndex
+                                           continuation:(screen_char_t *)continuation;
 
 // Return the width of the screen in cells.
 - (int)accessibilityHelperWidth;
@@ -36,8 +37,15 @@
 // Select the range, which is in accessibility-space.
 - (void)accessibilityHelperSetSelectedRange:(VT100GridCoordRange)range;
 
+// Gets the selected range in accessibility-space.
+- (VT100GridCoordRange)accessibilityHelperSelectedRange;
+
 // Returns the contents of selected text in accessibility-space only.
 - (NSString *)accessibilityHelperSelectedText;
+
+// Returns the URL of the current document
+- (NSURL *)accessibilityHelperCurrentDocumentURL;
+
 @end
 
 // This outsources accessibilty methods for PTYTextView. It's useful to keep
@@ -47,11 +55,28 @@
 
 @property(nonatomic, assign) id<iTermTextViewAccessibilityHelperDelegate> delegate;
 
-- (NSArray *)accessibilityAttributeNames;
-- (NSArray *)accessibilityParameterizedAttributeNames;
-- (id)accessibilityAttributeValue:(NSString *)attribute forParameter:(id)parameter handled:(BOOL *)handled;
-- (BOOL)accessibilityIsAttributeSettable:(NSString *)attribute handled:(BOOL *)handled;
-- (void)accessibilitySetValue:(id)value forAttribute:(NSString *)attribute handled:(BOOL *)handled;
-- (id)accessibilityAttributeValue:(NSString *)attribute handled:(BOOL *)handled;
+- (NSInteger)lineForIndex:(NSUInteger)theIndex;
+- (NSRange)rangeForLine:(NSUInteger)lineNumber;
+- (NSString *)stringForRange:(NSRange)range;
+// WARNING! screenPosition is idiotic: y=0 is the top of the main screen and it increases going down.
+- (NSRange)rangeForPosition:(NSPoint)screenPosition;
+- (NSRange)rangeOfIndex:(NSUInteger)theIndex;
+- (NSRect)boundsForRange:(NSRange)range;
+- (NSAttributedString *)attributedStringForRange:(NSRange)range;
+- (NSAccessibilityRole)role;
+- (NSString *)roleDescription;
+- (NSString *)help;
+- (BOOL)focused;
+- (NSString *)label;
+- (NSString *)allText;
+- (NSInteger)numberOfCharacters;
+- (NSString *)selectedText;
+- (NSRange)selectedTextRange;
+- (NSArray *)selectedTextRanges;
+- (NSInteger)insertionPointLineNumber;
+- (NSRange)visibleCharacterRange;
+- (NSURL *)currentDocumentURL;
+- (void)setSelectedTextRange:(NSRange)range;
+
 
 @end

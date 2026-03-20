@@ -10,17 +10,15 @@
 #import "iTermApplicationDelegate.h"
 
 @implementation PopupWindow {
-    NSWindow* parentWindow_;
     BOOL shutdown_;
 }
 
-- (id)initWithContentRect:(NSRect)contentRect
-                styleMask:(NSUInteger)aStyle
-                  backing:(NSBackingStoreType)bufferingType
-                    defer:(BOOL)flag
-{
+- (instancetype)initWithContentRect:(NSRect)contentRect
+                          styleMask:(NSWindowStyleMask)aStyle
+                            backing:(NSBackingStoreType)bufferingType
+                              defer:(BOOL)flag {
     self = [super initWithContentRect:contentRect
-                            styleMask:NSBorderlessWindowMask
+                            styleMask:NSWindowStyleMaskBorderless
                               backing:bufferingType
                                 defer:flag];
     if (self) {
@@ -32,12 +30,15 @@
 
 - (void)dealloc
 {
-    [parentWindow_ release];
+    [_owningWindow release];
     [super dealloc];
 }
 
-- (BOOL)canBecomeKeyWindow
-{
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+
+- (BOOL)canBecomeMainWindow {
     return YES;
 }
 
@@ -54,16 +55,18 @@
     shutdown_ = YES;
 }
 
-- (void)setParentWindow:(NSWindow*)parentWindow
-{
-    [parentWindow_ autorelease];
-    parentWindow_ = [parentWindow retain];
+- (void)setOwningWindow:(NSWindow *)owningWindow {
+    [_owningWindow autorelease];
+    _owningWindow = [owningWindow retain];
 }
 
-- (void)close
-{
+- (void)closeWithoutAdjustingWindowOrder {
+    [super close];
+}
+
+- (void)close {
     if (shutdown_) {
-        [super close];
+        [self closeWithoutAdjustingWindowOrder];
     } else {
         // The OS will send a hotkey window to the background if it's open and in
         // all spaces. Make it key before closing. This has to be done later because if you do it
@@ -77,10 +80,14 @@
 
 - (void)twiddleKeyWindow
 {
-    iTermApplicationDelegate *theDelegate = (iTermApplicationDelegate *)[NSApp delegate];
+    iTermApplicationDelegate *theDelegate = [iTermApplication.sharedApplication delegate];
     [theDelegate makeHotKeyWindowKeyIfOpen];
     [super close];
-    [parentWindow_ makeKeyAndOrderFront:self];
+    [_owningWindow makeKeyAndOrderFront:self];
+}
+
+- (BOOL)autoHidesHotKeyWindow {
+    return NO;
 }
 
 @end

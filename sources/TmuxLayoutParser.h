@@ -24,19 +24,29 @@ extern NSString *kLayoutDictWindowPaneKey;  // window pane number (leaf nodes on
 // These values are filled in by other classes:
 extern NSString *kLayoutDictPixelWidthKey;
 extern NSString *kLayoutDictPixelHeightKey;
+extern NSString *kLayoutDictMaximumPixelWidthKey;  // Largest size with same number of cells
+extern NSString *kLayoutDictMaximumPixelHeightKey;  // Largest size with same number of cells
 extern NSString *kLayoutDictHistoryKey;       // Array of screen_char_t-filled NSData
 extern NSString *kLayoutDictAltHistoryKey;    // Alternate screen history
 extern NSString *kLayoutDictStateKey;         // see TmuxStateParser
+extern NSString *kLayoutDictHotkeyKey;        // Session hotkey dictionary
+extern NSString *kLayoutDictTabColorKey;      // Tab color
+extern NSString *kLayoutDictFocusReportingKey;  // Focus reporting
 
-typedef enum {
+// Children of leaf:
+extern NSString *kLayoutDictTabOpenedManually;  // Was this tab opened by a user-initiated action?
+extern NSString *kLayoutDictAllInitialWindowsAdded;  // Have we finished initial window loading?
+extern NSString *kLayoutDictTabIndex;           // Which index the tab should have in the native window
+
+typedef NS_ENUM(NSInteger, LayoutNodeType) {
     kLeafLayoutNode,
     kHSplitLayoutNode,
     kVSplitLayoutNode
-} LayoutNodeType;
+};
 
 @interface TmuxLayoutParser : NSObject
 
-+ (TmuxLayoutParser *)sharedInstance;
++ (instancetype)sharedInstance;
 - (NSMutableDictionary *)parsedLayoutFromString:(NSString *)layout;
 - (NSMutableDictionary *)windowPane:(int)windowPane
                         inParseTree:(NSMutableDictionary *)parseTree;

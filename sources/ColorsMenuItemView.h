@@ -26,15 +26,25 @@
 
 #import <Cocoa/Cocoa.h>
 
-@interface ColorsMenuItemView : NSView
-{
-    NSColor* color_;
-}
+@class ColorsMenuItemView;
 
-- (NSGradient *)gradientForColorIndex:(NSInteger)colorIndex;
+@protocol ColorsMenuItemViewDelegate <NSObject>
+- (void)colorsMenuItemViewDidRequestColorPicker:(ColorsMenuItemView *)view;
+@end
+
+@interface ColorsMenuItemView : NSView
+@property(nonatomic, strong) NSColor *currentColor;
+@property(nonatomic, readonly) NSColor *color;
+@property(nonatomic, weak) id<ColorsMenuItemViewDelegate> delegate;
+
++ (NSSize)preferredSize;
+
 - (void)drawRect:(NSRect)rect;
 - (void)mouseUp:(NSEvent*) event;
-- (NSColor*)color;
 
+@end
+
+@interface iTermTabColorMenuItem: NSMenuItem
+@property (nonatomic, readonly) ColorsMenuItemView *colorsView;
 @end
 

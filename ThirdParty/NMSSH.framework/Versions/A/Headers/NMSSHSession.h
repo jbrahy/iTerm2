@@ -1,6 +1,9 @@
 #import "NMSSH.h"
 
-@class NMSSHHostConfig;
+@class NMSSHHostConfig, NMSFTP;
+@protocol NMSSHSessionDelegate;
+
+extern void (^ _Nullable gNMSSHTraceCallback)(NSData * _Nonnull);
 
 typedef NS_ENUM(NSInteger, NMSSHSessionHash) {
     NMSSHSessionHashMD5,
@@ -52,18 +55,20 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
 
  The `delegate` is sent messages when content is loading.
  */
-@property (nonatomic, weak) id<NMSSHSessionDelegate> delegate;
+@property (nonatomic, nullable, weak) id<NMSSHSessionDelegate> delegate;
 
 /**
  The synthesized config for the current host, produced by combining values from
  all configs in the chain by priority, plus client-provided defaults. This is
  only set if NMSSHSession was initialized with a config chain.
  */
-@property (nonatomic, readonly) NMSSHHostConfig *hostConfig;
+@property (nonatomic, nullable, readonly) NMSSHHostConfig *hostConfig;
 
 /// ----------------------------------------------------------------------------
 /// @name Initialize a new SSH session
 /// ----------------------------------------------------------------------------
+
+- (nonnull instancetype)init NS_UNAVAILABLE;
 
 /**
  Shorthand method for initializing a NMSSHSession object and calling connect.
@@ -74,7 +79,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param username A valid username the server will accept
  @returns NMSSHSession instance
  */
-+ (instancetype)connectToHost:(NSString *)host withUsername:(NSString *)username;
++ (nonnull instancetype)connectToHost:(nonnull NSString *)host withUsername:(nonnull NSString *)username;
 
 /**
  Shorthand method for initializing a NMSSHSession object and calling connect,
@@ -85,7 +90,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param username A valid username the server will accept
  @returns NMSSHSession instance
  */
-+ (instancetype)connectToHost:(NSString *)host port:(NSInteger)port withUsername:(NSString *)username;
++ (nonnull instancetype)connectToHost:(nonnull NSString *)host port:(NSInteger)port withUsername:(nonnull NSString *)username;
 
 /**
  Create and setup a new NMSSH instance.
@@ -96,7 +101,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param username A valid username the server will accept
  @returns NMSSHSession instance
  */
-- (instancetype)initWithHost:(NSString *)host andUsername:(NSString *)username;
+- (nonnull instancetype)initWithHost:(nonnull NSString *)host andUsername:(nonnull NSString *)username;
 
 /**
  Create and setup a new NMSSH instance. This is the designated initializer.
@@ -106,7 +111,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param username A valid username the server will accept
  @returns NMSSHSession instance
  */
-- (instancetype)initWithHost:(NSString *)host port:(NSInteger)port andUsername:(NSString *)username;
+- (nonnull instancetype)initWithHost:(nonnull NSString *)host port:(NSInteger)port andUsername:(nonnull NSString *)username NS_DESIGNATED_INITIALIZER;
 
 /**
  Create and setup a new NMSSH instance using a chain of config files.
@@ -126,48 +131,48 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param defaultUsername A valid username the server will accept (may be
      overridden by a config)
  */
-- (instancetype)initWithHost:(NSString *)host
-                     configs:(NSArray *)configs
-             withDefaultPort:(NSInteger)defaultPort
-             defaultUsername:(NSString *)defaultUsername;
+- (nonnull instancetype)initWithHost:(nonnull NSString *)host
+                             configs:(nonnull NSArray *)configs
+                     withDefaultPort:(NSInteger)defaultPort
+                     defaultUsername:(nonnull NSString *)defaultUsername;
 
 /// ----------------------------------------------------------------------------
 /// @name Connection settings
 /// ----------------------------------------------------------------------------
 
 /** Full server hostname in the format `@"{hostname}"`. */
-@property (nonatomic, readonly) NSString *host;
+@property (nonatomic, nonnull, readonly) NSString *host;
 
 /** The server port to connect to. */
-@property (nonatomic, readonly) NSNumber *port;
+@property (nonatomic, nonnull, readonly) NSNumber *port;
 
 /** Username that will authenticate against the server. */
-@property (nonatomic, readonly) NSString *username;
+@property (nonatomic, nonnull, readonly) NSString *username;
 
 /** Timeout for libssh2 blocking functions. */
-@property (nonatomic, strong) NSNumber *timeout;
+@property (nonatomic, nonnull, strong) NSNumber *timeout;
 
 /** Last session error. */
-@property (nonatomic, readonly) NSError *lastError;
+@property (nonatomic, nullable, readonly) NSError *lastError;
 
 /** The hash algorithm to use to encode the fingerprint during connection, default value is NMSSHSessionHashMD5. */
 @property (nonatomic, assign) NMSSHSessionHash fingerprintHash;
 
 /** The banner that will be sent to the remote host when the SSH session is started. */
-@property (nonatomic, strong) NSString *banner;
+@property (nonatomic, nullable, strong) NSString *banner;
 
 /** The remote host banner. */
-@property (nonatomic, readonly) NSString *remoteBanner;
+@property (nonatomic, nullable, readonly) NSString *remoteBanner;
 
 /// ----------------------------------------------------------------------------
 /// @name Raw libssh2 session and socket reference
 /// ----------------------------------------------------------------------------
 
 /** Raw libssh2 session instance. */
-@property (nonatomic, readonly, getter = rawSession) LIBSSH2_SESSION *session;
+@property (nonatomic, nullable, readonly, getter = rawSession) LIBSSH2_SESSION *session;
 
 /** Raw session socket. */
-@property (nonatomic, readonly) CFSocketRef socket;
+@property (nonatomic, nullable, readonly) CFSocketRef socket;
 
 /// ----------------------------------------------------------------------------
 /// @name Open/Close a connection to the server
@@ -178,6 +183,9 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  (read-only).
  */
 @property (nonatomic, readonly, getter = isConnected) BOOL connected;
+
+/** SSH_AUTH_SOCK replacement. Gives path to ssh-agent unix domain socket. */
+@property (nonatomic, nullable, copy) NSString *authSock;
 
 /**
  Connect to the server using the default timeout (10 seconds)
@@ -192,7 +200,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param timeout The time, in seconds, to wait before giving up.
  @returns Connection status
  */
-- (BOOL)connectWithTimeout:(NSNumber *)timeout;
+- (BOOL)connectWithTimeout:(nonnull NSNumber *)timeout;
 
 /**
  Close the session
@@ -215,10 +223,10 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param password Password for connected user
  @returns Authentication success
  */
-- (BOOL)authenticateByPassword:(NSString *)password;
+- (BOOL)authenticateByPassword:(nonnull NSString *)password;
 
 /**
- Authenticate by private key pair
+ Authenticate by private key pair from file(s)
 
  Use password:nil when the key is unencrypted
 
@@ -227,9 +235,23 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param password Password for encrypted private key
  @returns Authentication success
  */
-- (BOOL)authenticateByPublicKey:(NSString *)publicKey
-                     privateKey:(NSString *)privateKey
-                    andPassword:(NSString *)password;
+- (BOOL)authenticateByPublicKey:(nullable NSString *)publicKey
+                     privateKey:(nonnull NSString *)privateKey
+                    andPassword:(nullable NSString *)password;
+
+/**
+ Authenticate by private key pair
+
+ Use password:nil when the key is unencrypted
+
+ @param publicKey public key
+ @param privateKey private key
+ @param password Password for encrypted private key
+ @returns Authentication success
+ */
+- (BOOL)authenticateByInMemoryPublicKey:(nullable NSString *)publicKey
+                             privateKey:(nonnull NSString *)privateKey
+                            andPassword:(nullable NSString *)password;
 
 /**
  Authenticate by keyboard-interactive using delegate.
@@ -249,7 +271,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
      to the given question.
  @returns Authentication success
  */
-- (BOOL)authenticateByKeyboardInteractiveUsingBlock:(NSString *(^)(NSString *request))authenticationBlock;
+- (BOOL)authenticateByKeyboardInteractiveUsingBlock:(NSString * _Nonnull(^_Nullable)( NSString * _Nonnull request))authenticationBlock;
 
 /**
  Setup and connect to an SSH agent
@@ -263,7 +285,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
 
  @returns Array of string descripting supported authentication methods
  */
-- (NSArray *)supportedAuthenticationMethods;
+- (nullable NSArray<NSString *> *)supportedAuthenticationMethods;
 
 /**
  Get the fingerprint of the remote host.
@@ -272,7 +294,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param hashType The hash algorithm to use to encode the fingerprint
  @returns The host's fingerprint
  */
-- (NSString *)fingerprint:(NMSSHSessionHash)hashType;
+- (nullable NSString *)fingerprint:(NMSSHSessionHash)hashType;
 
 /// ----------------------------------------------------------------------------
 /// @name Known hosts
@@ -289,7 +311,7 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param files An array of filenames to check, or `nil` to use the default paths.
  @returns Known host status for current host.
  */
-- (NMSSHKnownHostStatus)knownHostStatusInFiles:(NSArray *)files;
+- (NMSSHKnownHostStatus)knownHostStatusInFiles:(nullable NSArray<NSString *> *)files;
 
 /**
  Adds the passed-in host to the user's known hosts file.
@@ -313,19 +335,19 @@ typedef NS_ENUM(NSInteger, NMSSHKnownHostStatus) {
  @param salt The base64-encoded salt used for hashing. May be `nil`.
  @returns Success status.
  */
-- (BOOL)addKnownHostName:(NSString *)hostName
+- (BOOL)addKnownHostName:(nonnull NSString *)hostName
                     port:(NSInteger)port
-                  toFile:(NSString *)fileName
-                withSalt:(NSString *)salt;
+                  toFile:(nullable NSString *)fileName
+                withSalt:(nullable NSString *)salt;
 
 /// ----------------------------------------------------------------------------
 /// @name Quick channel/sftp access
 /// ----------------------------------------------------------------------------
 
 /** Get a pre-configured NMSSHChannel object for the current session (read-only). */
-@property (nonatomic, readonly) NMSSHChannel *channel;
+@property (nonatomic, nonnull, readonly) NMSSHChannel *channel;
 
 /** Get a pre-configured NMSFTP object for the current session (read-only). */
-@property (nonatomic, readonly) NMSFTP *sftp;
+@property (nonatomic, nonnull, readonly) NMSFTP *sftp;
 
 @end

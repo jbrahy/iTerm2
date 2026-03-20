@@ -8,21 +8,9 @@
 
 #import "iTermProfilePreferencesBaseViewController.h"
 
-extern NSString *const kCustomColorPresetsKey;
+extern NSString *const iTermColorPreferencesDidDisappear;
+extern NSString *const iTermColorPreferencesDidAppear;
 
 @interface ProfilesColorsPreferencesViewController : iTermProfilePreferencesBaseViewController
-
-// Returns the dictionary of built-in color presets.
-+ (NSDictionary *)builtInColorPresets;
-
-// Returns the dictionary of user-loaded color presets.
-+ (NSDictionary *)customColorPresets;
-
-// Load a named color preset into a given profile and model.
-+ (BOOL)loadColorPresetWithName:(NSString *)presetName
-                      inProfile:(Profile *)profile
-                          model:(ProfileModel *)model;
-
-- (BOOL)importColorPresetFromFile:(NSString*)filename;
-
++ (NSString *)nameOfPresetUsedByProfile:(Profile *)profile;
 @end

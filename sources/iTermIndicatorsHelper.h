@@ -14,16 +14,29 @@ extern NSString *const kiTermIndicatorWrapToBottom;
 
 extern NSString *const kiTermIndicatorMaximized;
 extern NSString *const kItermIndicatorBroadcastInput;
+extern NSString *const kItermIndicatorBroadcastInputReceiver;
 extern NSString *const kiTermIndicatorCoprocess;
 extern NSString *const kiTermIndicatorAlert;
 extern NSString *const kiTermIndicatorAllOutputSuppressed;
 extern NSString *const kiTermIndicatorZoomedIn;
+extern NSString *const kiTermIndicatorScreenshotMode;
+extern NSString *const kiTermIndicatorCopyMode;
+extern NSString *const kiTermIndicatorDebugLogging;
+extern NSString *const kiTermIndicatorFilter;
+extern NSString *const kiTermIndicatorSecureKeyboardEntry_Forced;
+extern NSString *const kiTermIndicatorSecureKeyboardEntry_User;
+extern NSString *const kiTermIndicatorPinned;
+extern NSString *const kiTermIndicatorAIChatLinked;
+extern NSString *const kiTermIndicatorAIChatStreaming;
+extern NSString *const kiTermIndicatorChannel;
+extern NSString *const kiTermIndicatorBufferingInput;
+extern NSString *const kiTermIndicatorShowRememberedAlerts;
 
 extern CGFloat kiTermIndicatorStandardHeight;
 
 @protocol iTermIndicatorsHelperDelegate <NSObject>
 
-- (void)setNeedsDisplay:(BOOL)needsDisplay;
+- (void)indicatorNeedsDisplay;
 - (NSColor *)indicatorFullScreenFlashColor;
 
 @end
@@ -31,11 +44,30 @@ extern CGFloat kiTermIndicatorStandardHeight;
 @interface iTermIndicatorsHelper : NSObject
 
 @property(nonatomic, assign) id<iTermIndicatorsHelperDelegate> delegate;
+@property(nonatomic, readonly) NSInteger numberOfVisibleIndicators;
+@property(nonatomic, assign) BOOL backgroundlessMode;
+@property(nonatomic, assign) CGFloat indicatorSize; // Size for non-large indicators (default: 26)
 
-- (void)setIndicator:(NSString *)identifier visible:(BOOL)visible;
-- (void)beginFlashingIndicator:(NSString *)identifier;
-- (NSInteger)numberOfVisibleIndicators;
+// Alpha value for fullscreen flash.
+@property(nonatomic, readonly) CGFloat fullScreenAlpha;
+@property(nonatomic, copy) void (^configurationObserver)(void);
+
+- (void)setIndicator:(NSString *)identifier visible:(BOOL)visible darkBackground:(BOOL)darkBackground;
+- (void)beginFlashingIndicator:(NSString *)identifier darkBackground:(BOOL)darkBackground;
 - (void)beginFlashingFullScreen;
+
+// Use this from drawRect:
 - (void)drawInFrame:(NSRect)frame;
+
+// Use this with Metal
+- (void)didDraw;
+
+- (void)enumerateTopRightIndicatorsInFrame:(NSRect)frame andDraw:(BOOL)shouldDraw block:(void (^)(NSString *, NSImage *, NSRect, BOOL))block;
+- (void)enumerateCenterIndicatorsInFrame:(NSRect)frame block:(void (^)(NSString *, NSImage *, NSRect, CGFloat, BOOL))block;
+
+- (NSString *)helpTextForIndicatorAt:(NSPoint)point sessionID:(NSString *)sessionID;
+- (NSString *)helpTextForIndicatorWithName:(NSString *)name sessionID:(NSString *)sessionID;
++ (NSArray<NSString *> *)sequentialIndicatorIdentifiers;
+- (void)configurationDidComplete;
 
 @end

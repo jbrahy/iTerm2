@@ -7,31 +7,44 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import "ITAddressBookMgr.h"
 
 typedef NS_OPTIONS(NSInteger, iTermSavePanelOptions) {
     // If the file exists, ask the user if he'd like to append to it or replace it.
     // If this option is not set, the user will only be asked about replacing.
-    kSavePanelOptionAppendOrReplace = (1 << 0)
+    kSavePanelOptionAppendOrReplace = (1 << 0),
+    kSavePanelOptionFileFormatAccessory = (1 << 1),
+    kSavePanelOptionLogPlainTextAccessory = (1 << 2),
+    kSavePanelOptionIncludeTimestampsAccessory = (1 << 3),
+    kSavePanelOptionLocalhostOnly = (1 << 4),
+    kSavePanelOptionDefaultToLocalhost = (1 << 5),
 };
 
-typedef NS_ENUM(NSInteger, iTermSavePanelReplaceorAppend) {
+typedef NS_ENUM(NSInteger, iTermSavePanelReplaceOrAppend) {
     kSavePanelReplaceOrAppendSelectionNotApplicable,  // No existing file or option not specified.
     kSavePanelReplaceOrAppendSelectionReplace,
     kSavePanelReplaceOrAppendSelectionAppend,
 };
 
+@class iTermModernSavePanel;
+@class iTermSavePanelItem;
+
 @interface iTermSavePanel : NSObject
 
 // valid only if options includes kSavePanelOptionAppendOrReplace
-@property(nonatomic, readonly) iTermSavePanelReplaceorAppend replaceOrAppend;
+@property(nonatomic, readonly) iTermSavePanelReplaceOrAppend replaceOrAppend;
 
 // Path the user selected.
-@property(nonatomic, readonly) NSString *path;
+@property(nonatomic, strong, readonly) iTermSavePanelItem *item;
+@property (nonatomic, readonly) iTermLoggingStyle loggingStyle;
+@property(nonatomic, readonly) BOOL timestamps;
 
-// Prompts the user and returns a new iTermSavePanel.
-+ (iTermSavePanel *)showWithOptions:(NSInteger)options
-                         identifier:(NSString *)identifier
-                   initialDirectory:(NSString *)initialDirectory
-                    defaultFilename:(NSString *)defaultFilename;
++ (void)asyncShowWithOptions:(iTermSavePanelOptions)options
+                  identifier:(NSString *)identifier
+            initialDirectory:(NSString *)initialDirectory
+             defaultFilename:(NSString *)defaultFilename
+            allowedFileTypes:(NSArray<NSString *> *)allowedFileTypes
+                      window:(NSWindow *)window
+                  completion:(void (^)(iTermModernSavePanel *panel, iTermSavePanel *savePanel))completion;
 
 @end

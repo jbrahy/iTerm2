@@ -7,7 +7,11 @@
 //
 
 #import "NSDictionary+iTerm.h"
+
+#import "iTermTuple.h"
+#import "DebugLogging.h"
 #import "NSColor+iTerm.h"
+#import "NSWorkspace+iTerm.h"
 
 static NSString *const kGridCoordXKey = @"x";
 static NSString *const kGridCoordYKey = @"y";
@@ -15,13 +19,79 @@ static NSString *const kGridCoordAbsYKey = @"absY";
 static NSString *const kGridCoordStartKey = @"start";
 static NSString *const kGridCoordEndKey = @"end";
 static NSString *const kGridCoordRange = @"Coord Range";
+static NSString *const kGridCoordAbsRange = @"Coord Abs Range";
 static NSString *const kGridRange = @"Range";
 static NSString *const kGridRangeLocation = @"Location";
 static NSString *const kGridRangeLength = @"Length";
 static NSString *const kGridSizeWidth = @"Width";
 static NSString *const kGridSizeHeight = @"Height";
 
+// Keys for hotkey dictionary
+static NSString *const kHotKeyKeyCode = @"keyCode";
+static NSString *const kHotKeyModifiers = @"modifiers";
+static NSString *const kHotKeyModifierActivation = @"modifier activation";
+
+static const NSEventModifierFlags iTermHotkeyModifierMask = (NSEventModifierFlagCommand |
+                                                             NSEventModifierFlagControl |
+                                                             NSEventModifierFlagOption |
+                                                             NSEventModifierFlagShift);
+
+@interface NSArray(SizeEstimation)
+@end
+
+@implementation NSArray(SizeEstimation)
+
+- (NSInteger)addSizeInfoToSizes:(NSMutableDictionary<NSString *, NSNumber *> *)sizes
+                         counts:(NSCountedSet<NSString *> *)counts
+                        keypath:(NSString *)keypath {
+    __block NSInteger total = 0;
+    NSString *path = [keypath stringByAppendingString:@"[*]"];
+    [self enumerateObjectsUsingBlock:^(id  _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        NSInteger size;
+        if ([obj respondsToSelector:_cmd]) {
+            size = [(id)obj addSizeInfoToSizes:sizes counts:counts keypath:path];
+        } else if ([obj isKindOfClass:[NSString class]]) {
+            size = [(NSString *)obj length] * 2;
+        } else if ([obj isKindOfClass:[NSData class]]) {
+            size = [(NSData *)obj length];
+        } else {
+            // Enough space for an isa and a word. This is number, date, or null.
+            size = 16;
+        }
+        total += size;
+        NSNumber *n = sizes[path];
+        n = @(n.integerValue + size);
+        sizes[path] = n;
+        [counts addObject:path];
+    }];
+    return total;
+}
+
+@end
+
 @implementation NSDictionary (iTerm)
+
+- (BOOL)profileIsBrowser {
+    return [self[KEY_CUSTOM_COMMAND] isEqualToString:kProfilePreferenceCommandTypeBrowserValue];
+}
+
+- (BOOL)profileIsTerminal {
+    return !self.profileIsBrowser;
+}
+
++ (instancetype)it_dictionaryWithContentsOfData:(NSData *)data {
+    NSError *error = nil;
+    NSDictionary *dictionary = [NSPropertyListSerialization propertyListWithData:data
+                                                                         options:NSPropertyListImmutable
+                                                                          format:nil
+                                                                           error:&error];
+
+    if (error) {
+        DLog(@"Error parsing plist: %@", error.localizedDescription);
+        return nil;
+    }
+    return dictionary;
+}
 
 + (NSDictionary *)dictionaryWithGridCoord:(VT100GridCoord)coord {
     return @{ kGridCoordXKey: @(coord.x),
@@ -77,6 +147,22 @@ static NSString *const kGridSizeHeight = @"Height";
     return range;
 }
 
++ (NSDictionary *)dictionaryWithGridAbsWindowedRange:(VT100GridAbsWindowedRange)absRange {
+    return @{ kGridCoordAbsRange: [NSDictionary dictionaryWithGridAbsCoordRange:absRange.coordRange],
+              kGridRange: [NSDictionary dictionaryWithGridRange:absRange.columnWindow] };
+}
+
+- (VT100GridAbsWindowedRange)gridAbsWindowedRange {
+    VT100GridAbsWindowedRange absRange;
+    absRange.coordRange = [self[kGridCoordAbsRange] gridAbsCoordRange];
+    absRange.columnWindow = [self[kGridRange] gridRange];
+    return absRange;
+}
+
+- (BOOL)hasGridAbsWindowedRange {
+    return self[kGridCoordAbsRange] != nil && self[kGridRange] != nil;
+}
+
 + (NSDictionary *)dictionaryWithGridRange:(VT100GridRange)range {
     return @{ kGridRangeLocation: @(range.location),
               kGridRangeLength: @(range.length) };
@@ -106,11 +192,28 @@ static NSString *const kGridSizeHeight = @"Height";
     }
 }
 
-- (NSColor *)colorValue {
-    return [self colorValueWithDefaultAlpha:1.0];
+- (BOOL)isColorValue {
+    return (self[kEncodedColorDictionaryRedComponent] != nil &&
+            self[kEncodedColorDictionaryGreenComponent] != nil &&
+            self[kEncodedColorDictionaryBlueComponent] != nil);
 }
 
-- (NSColor *)colorValueWithDefaultAlpha:(CGFloat)alpha {
+- (NSColor *)colorValue {
+    return [self colorValueForKey:nil];
+}
+
++ (CGFloat)defaultAlphaForColorPresetKey:(NSString *)key {
+    if ([key isEqualToString:KEY_CURSOR_GUIDE_COLOR] ||
+        [key isEqualToString:KEY_CURSOR_GUIDE_COLOR COLORS_LIGHT_MODE_SUFFIX] ||
+        [key isEqualToString:KEY_CURSOR_GUIDE_COLOR COLORS_DARK_MODE_SUFFIX]) {
+        return 0.25;
+    } else {
+        return 1.0;
+    }
+}
+
+- (NSColor *)colorValueForKey:(NSString *)key {
+    CGFloat alpha = [NSDictionary defaultAlphaForColorPresetKey:key];
     if ([self count] < 3) {
         return [NSColor colorWithCalibratedRed:0.0 green:0.0 blue:0.0 alpha:1.0];
     }
@@ -125,13 +228,18 @@ static NSString *const kGridSizeHeight = @"Height";
                                             green:[[self objectForKey:kEncodedColorDictionaryGreenComponent] floatValue]
                                              blue:[[self objectForKey:kEncodedColorDictionaryBlueComponent] floatValue]
                                             alpha:alpha];
-        return [srgb colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
-    } else {
-        return [NSColor colorWithCalibratedRed:[[self objectForKey:kEncodedColorDictionaryRedComponent] floatValue]
-                                         green:[[self objectForKey:kEncodedColorDictionaryGreenComponent] floatValue]
-                                          blue:[[self objectForKey:kEncodedColorDictionaryBlueComponent] floatValue]
-                                         alpha:alpha];
+        return srgb;
     }
+    if ([colorSpace isEqualToString:kEncodedColorDictionaryP3ColorSpace]) {
+        return [NSColor colorWithDisplayP3Red:[[self objectForKey:kEncodedColorDictionaryRedComponent] floatValue]
+                                        green:[[self objectForKey:kEncodedColorDictionaryGreenComponent] floatValue]
+                                         blue:[[self objectForKey:kEncodedColorDictionaryBlueComponent] floatValue]
+                                        alpha:alpha];
+    }
+    return [NSColor colorWithCalibratedRed:[[self objectForKey:kEncodedColorDictionaryRedComponent] floatValue]
+                                     green:[[self objectForKey:kEncodedColorDictionaryGreenComponent] floatValue]
+                                      blue:[[self objectForKey:kEncodedColorDictionaryBlueComponent] floatValue]
+                                     alpha:alpha];
 }
 
 - (NSDictionary *)dictionaryByRemovingNullValues {
@@ -143,6 +251,297 @@ static NSString *const kGridSizeHeight = @"Height";
         }
     }
     return temp;
+}
+
+- (NSDictionary *)dictionaryBySettingObject:(id)object forKey:(id)key {
+    NSMutableDictionary *temp = [self mutableCopy];
+    temp[key] = object;
+    return temp;
+}
+
+- (NSDictionary *)dictionaryByRemovingObjectForKey:(id)key {
+    NSMutableDictionary *temp = [self mutableCopy];
+    [temp removeObjectForKey:key];
+    return temp;
+}
+
+- (NSDictionary *)dictionaryKeepingOnlyKeys:(NSArray *)keys {
+    NSMutableDictionary *dictionary = [NSMutableDictionary dictionary];
+    for (id key in keys) {
+        id object = self[key];
+        if (object) {
+            dictionary[key] = object;
+        }
+    }
+    return dictionary;
+}
+
+- (NSData *)propertyListData {
+    NSString *filename = [[NSWorkspace sharedWorkspace] temporaryFileNameWithPrefix:@"DictionaryPropertyList" suffix:@"iTerm2"];
+    [self writeToFile:filename atomically:NO];
+    NSData *data = [NSData dataWithContentsOfFile:filename];
+    [[NSFileManager defaultManager] removeItemAtPath:filename error:nil];
+    return data;
+}
+
+- (NSString *)sizeInfo {
+    NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionary];
+    NSCountedSet<NSString *> *counts = [[NSCountedSet alloc] init];
+    sizes[@""] = @([self addSizeInfoToSizes:sizes counts:counts keypath:@""]);
+    [counts addObject:@""];
+
+    NSMutableString *result = [NSMutableString string];
+    [sizes enumerateKeysAndObjectsUsingBlock:^(NSString * _Nonnull key, NSNumber * _Nonnull obj, BOOL * _Nonnull stop) {
+        [result appendFormat:@"%@ %@ %@\n", obj, @([counts countForObject:key]), key];
+    }];
+    return result;
+}
+
+- (NSDictionary *)filteredWithBlock:(BOOL (^NS_NOESCAPE)(id key, id value))block {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        if (block(key, obj)) {
+            result[key] = obj;
+        }
+    }];
+    return result;
+}
+
+- (NSDictionary *)mapValuesWithBlock:(id (^)(id, id))block {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        id mapped = block(key, obj);
+        if (mapped) {
+            result[key] = mapped;
+        }
+    }];
+    return result;
+}
+
+- (NSDictionary *)mapKeysWithBlock:(id (^)(id, id))block {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        id mappedKey = block(key, obj);
+        if (mappedKey) {
+            result[mappedKey] = obj;
+        }
+    }];
+    return result;
+}
+
+- (NSDictionary *)mapWithBlock:(iTermTuple *(^)(id, id))block {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        iTermTuple *tuple = block(key, obj);
+        if (tuple) {
+            result[tuple.firstObject] = tuple.secondObject;
+        }
+    }];
+    return result;
+}
+
+- (NSDictionary<id, NSDictionary *> *)classifyWithBlock:(id (^NS_NOESCAPE)(id key, id object))block {
+    NSMutableDictionary<id, NSMutableDictionary *> *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        id class = block(key, obj);
+        if (class) {
+            NSMutableDictionary *subdict = result[class];
+            if (!subdict) {
+                subdict = [NSMutableDictionary dictionary];
+                result[class] = subdict;
+            }
+            subdict[key] = obj;
+        }
+    }];
+    return result;
+}
+
+- (NSInteger)addSizeInfoToSizes:(NSMutableDictionary<NSString *, NSNumber *> *)sizes
+                    counts:(NSCountedSet<NSString *> *)counts
+                   keypath:(NSString *)keypath {
+    __block NSInteger total = 0;
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        NSInteger size;
+        NSString *path = [keypath stringByAppendingFormat:@".%@", key];
+        if ([obj respondsToSelector:_cmd]) {
+            size = [(id)obj addSizeInfoToSizes:sizes counts:counts keypath:path];
+        } else if ([obj isKindOfClass:[NSString class]]) {
+            size = [(NSString *)obj length] * 2;
+        } else if ([obj isKindOfClass:[NSData class]]) {
+            size = [(NSData *)obj length];
+        } else {
+            // Enough space for an isa and a word. This is number, date, or null.
+            size = 16;
+        }
+        total += size;
+        NSNumber *n = sizes[path];
+        n = @(n.integerValue + size);
+        sizes[path] = n;
+        [counts addObject:path];
+    }];
+    return total;
+}
+
+- (NSData *)it_xmlPropertyList {
+    NSOutputStream *outputStream = [NSOutputStream outputStreamToMemory];
+    [outputStream open];
+    NSError *error = nil;
+    [NSPropertyListSerialization writePropertyList:self
+                                          toStream:outputStream
+                                            format:NSPropertyListXMLFormat_v1_0
+                                           options:0
+                                             error:&error];
+    [outputStream close];
+    if (error != nil) {
+        return nil;
+    }
+    return [outputStream propertyForKey:NSStreamDataWrittenToMemoryStreamKey];
+}
+
+- (BOOL)it_writeToXMLPropertyListAt:(NSString *)filename {
+    NSOutputStream *outputStream = [NSOutputStream outputStreamToFileAtPath:filename append:NO];
+    [outputStream scheduleInRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
+    [outputStream open];
+    NSError *error = nil;
+    [NSPropertyListSerialization writePropertyList:self
+                                          toStream:outputStream
+                                            format:NSPropertyListXMLFormat_v1_0
+                                           options:0
+                                             error:&error];
+    [outputStream close];
+    return error == nil;
+}
+
+- (NSDictionary *)it_attributesDictionaryWithAppearance:(NSAppearance *)appearance {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        if ([obj isKindOfClass:[NSColor class]]) {
+            result[key] = [obj it_colorWithAppearance:appearance];
+        } else {
+            result[key] = obj;
+        }
+    }];
+    return result;
+}
+
+- (id)it_jsonSafeValue {
+    NSMutableDictionary *safe = [NSMutableDictionary dictionary];
+    for (id key in self) {
+        id value = self[key];
+        id safeKey = nil;
+        if ([key respondsToSelector:_cmd]) {
+            safeKey = [key it_jsonSafeValue];
+        }
+        if (safeKey && [value respondsToSelector:_cmd]) {
+            safe[safeKey] = [value it_jsonSafeValue];
+        }
+    }
+    return safe;
+}
+
+- (NSString *)it_classDescription {
+    return @"dictionary";
+}
+
+@end
+
+@implementation NSDictionary(HotKey)
+
++ (NSDictionary *)descriptorWithKeyCode:(NSUInteger)keyCode
+                              modifiers:(NSEventModifierFlags)modifiers {
+    return @{ kHotKeyKeyCode: @(keyCode),
+              kHotKeyModifiers: @(modifiers & iTermHotkeyModifierMask) };
+}
+
++ (iTermHotKeyDescriptor *)descriptorWithModifierActivation:(iTermHotKeyModifierActivation)activation {
+    return @{ kHotKeyModifierActivation: @(activation) };
+}
+
+- (NSUInteger)hotKeyKeyCode {
+    return [self[kHotKeyKeyCode] unsignedIntegerValue];
+}
+
+- (NSEventModifierFlags)hotKeyModifiers {
+    return [self[kHotKeyModifiers] unsignedIntegerValue] & iTermHotkeyModifierMask;
+}
+
+- (iTermHotKeyModifierActivation)hotKeyModifierActivation {
+    return [self[kHotKeyModifierActivation] unsignedIntegerValue];
+}
+
+- (BOOL)isEqualToDictionary:(NSDictionary *)other ignoringKeys:(NSSet *)keysToIgnore {
+    NSMutableSet *allKeys = [NSMutableSet set];
+    [allKeys addObjectsFromArray:self.allKeys];
+    [allKeys addObjectsFromArray:other.allKeys];
+
+    for (id key in allKeys) {
+        if ([keysToIgnore containsObject:key]) {
+            continue;
+        }
+        id myValue = self[key];
+        if (![myValue isEqual:other[key]]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+- (NSDictionary *)dictionaryByMergingDictionary:(NSDictionary *)other {
+    NSMutableDictionary *temp = [self mutableCopy];
+    [other enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        temp[key] = obj;
+    }];
+    return temp;
+}
+
+- (BOOL)isExactlyEqualToDictionary:(NSDictionary *)other {
+    if (self.count != other.count) {
+        return NO;
+    }
+    __block BOOL result = YES;
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        if (other[key] != obj) {
+            *stop = YES;
+            result = NO;
+        }
+    }];
+    return result;
+}
+
+- (BOOL)it_hasZeroValue {
+    return [self isEqualToDictionary:@{}];
+}
+
+@end
+
+@implementation NSMutableDictionary (iTerm)
+
+- (NSInteger)removeObjectsPassingTest:(BOOL (^)(id, id))block {
+    NSMutableSet *keys = [NSMutableSet set];
+    [self enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        if (block(key, obj)) {
+            [keys addObject:key];
+        }
+    }];
+    [self removeObjectsForKeys:keys.allObjects];
+    return keys.count;
+}
+
+- (void)it_mergeFrom:(NSDictionary *)other {
+    assert(self != other);
+    
+    [other enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+        self[key] = obj;
+    }];
+}
+
+- (void)it_addObject:(id)object toMutableArrayForKey:(id)key {
+    NSMutableArray *array = self[key];
+    if (!array) {
+        array = [NSMutableArray array];
+        self[key] = array;
+    }
+    [array addObject:object];
 }
 
 @end

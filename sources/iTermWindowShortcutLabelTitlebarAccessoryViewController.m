@@ -7,9 +7,15 @@
 //
 
 #import "iTermWindowShortcutLabelTitlebarAccessoryViewController.h"
+
+#import "iTerm2SharedARC-Swift.h"
 #import "iTermPreferences.h"
+#import "ITAddressBookMgr.h"
 #import "NSStringITerm.h"
 #import "PSMTabBarControl.h"
+
+@interface iTermWindowShortcutLabelTitlebarAccessoryViewController()<iTermTitleBarAccessoryViewController>
+@end
 
 @implementation iTermWindowShortcutLabelTitlebarAccessoryViewController {
     IBOutlet NSTextField *_label;
@@ -21,6 +27,13 @@
                                              selector:@selector(modifiersDidChange:)
                                                  name:kPSMModifierChangedNotification
                                                object:nil];
+    if (@available(macOS 10.16, *)) {
+        NSRect frame = _label.frame;
+        frame.origin.y += 4;
+        frame.size.width -=6;
+        _label.frame = frame;
+        _label.font = [NSFont titleBarFontOfSize:[NSFont systemFontSize]];
+    }
 }
 
 - (void)dealloc {
@@ -33,45 +46,98 @@
     [self updateLabel];
 }
 
+- (void)viewDidLayout {
+    if (@available(macOS 10.16, *)) {
+        // Big sur likes to change the height of this accessory view when the tab bar
+        // is added or removed from being an accessory view. Luckily there's enough
+        // wiggle room to keep it aligned.
+        const CGFloat containerHeight = self.view.frame.size.height;
+        NSRect frame = _label.frame;
+        CGFloat yOffset = 21;
+
+        // On macOS 26, adjust position to align with title baseline
+        if (@available(macOS 26, *)) {
+            switch (self.titlebarStyle) {
+                case iTermTitlebarStyleRegular:
+                    yOffset += 3;  // Move down by 3 points for regular theme
+                    break;
+                case iTermTitlebarStyleMinimal:
+                    // Minimal theme doesn't use titlebar accessory - handled in iTermRootTerminalView
+                case iTermTitlebarStyleCompact:
+                case iTermTitlebarStyleNone:
+                    break;
+            }
+        }
+
+        frame.origin.y = containerHeight - yOffset;
+        _label.frame = frame;
+    }
+}
 - (void)updateLabel {
     [self view];  // Ensure the label exists.
-    NSString *mods = [self modifiersString];
-    if (_ordinal == 0 || !mods) {
-        _label.stringValue = @"";
-    } else if (_ordinal >= 10) {
+    BOOL deemphasized;
+    NSString *string = [self.class stringForOrdinal:_ordinal deemphasized:&deemphasized];
+    if (!deemphasized) {
+        _label.stringValue = string;
+    } else {
         NSMutableParagraphStyle *paragraphStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
-        paragraphStyle.alignment = NSRightTextAlignment;
+        paragraphStyle.alignment = NSTextAlignmentRight;
         NSDictionary *attributes = @{ NSFontAttributeName: _label.font,
                                       NSForegroundColorAttributeName: [NSColor lightGrayColor],
                                       NSParagraphStyleAttributeName: paragraphStyle };
-        _label.attributedStringValue = [[[NSAttributedString alloc] initWithString:[@(_ordinal) stringValue]
+        _label.attributedStringValue = [[[NSAttributedString alloc] initWithString:string
                                                                         attributes:attributes] autorelease];
-    } else {
-        _label.attributedStringValue = nil;
-        _label.stringValue = [NSString stringWithFormat:@"%@%d", mods, _ordinal];
     }
 }
 
-- (NSString *)modifiersString {
++ (NSString *)stringForOrdinal:(int)ordinal deemphasized:(out BOOL *)deemphasized {
+    NSString *mods = [self.class modifiersString];
+    if (ordinal == 0) {
+        *deemphasized = NO;
+        return @"";
+    } else if (ordinal >= 10 || !mods) {
+        *deemphasized = YES;
+        return [@(ordinal) stringValue];
+    } else {
+        *deemphasized = NO;
+        return [NSString stringWithFormat:@"%@%d", mods, ordinal];
+    }
+}
+
++ (NSString *)modifiersString {
     switch ([iTermPreferences intForKey:kPreferenceKeySwitchWindowModifier]) {
         case kPreferenceModifierTagNone:
             return nil;
-            break;
 
         case kPreferencesModifierTagEitherCommand:
-            return [NSString stringForModifiersWithMask:NSCommandKeyMask];
-            break;
+            return [NSString stringForModifiersWithMask:NSEventModifierFlagCommand];
 
         case kPreferencesModifierTagEitherOption:
-            return [NSString stringForModifiersWithMask:NSAlternateKeyMask];
-            break;
+            return [NSString stringForModifiersWithMask:NSEventModifierFlagOption];
 
         case kPreferencesModifierTagCommandAndOption:
-            return [NSString stringForModifiersWithMask:(NSCommandKeyMask | NSAlternateKeyMask)];
-            break;
+            return [NSString stringForModifiersWithMask:(NSEventModifierFlagCommand | NSEventModifierFlagOption)];
+
+        case kPreferencesModifierTagLegacyRightControl:
+            return [NSString stringForModifiersWithMask:NSEventModifierFlagControl];
     }
 
     return @"";
+}
+
++ (iTermTitlebarStyle)titlebarStyleForWindowType:(int)windowType {
+    switch (windowType) {
+        case WINDOW_TYPE_NORMAL:
+        case WINDOW_TYPE_MAXIMIZED:
+            return iTermTitlebarStyleRegular;
+
+        case WINDOW_TYPE_COMPACT:
+        case WINDOW_TYPE_COMPACT_MAXIMIZED:
+            return iTermTitlebarStyleCompact;
+
+        default:
+            return iTermTitlebarStyleNone;
+    }
 }
 
 - (void)setIsMain:(BOOL)value {
@@ -80,11 +146,21 @@
 }
 
 - (void)updateTextColor {
-    _label.textColor = _isMain ? [NSColor windowFrameTextColor] : [NSColor colorWithWhite:0.67 alpha:1];
+    NSString *closest = [_label.effectiveAppearance bestMatchFromAppearancesWithNames:@[ NSAppearanceNameDarkAqua, NSAppearanceNameAqua]];
+    _label.textColor = [NSColor windowFrameTextColor];
+    if ([closest isEqualToString:NSAppearanceNameDarkAqua]) {
+        self.view.alphaValue = 0.5;
+    } else {
+        self.view.alphaValue = 1.0;
+    }
 }
 
 - (void)modifiersDidChange:(NSNotification *)notification {
     [self updateLabel];
+}
+
+- (BOOL)needsFullScreenMinHeight {
+    return NO;
 }
 
 @end

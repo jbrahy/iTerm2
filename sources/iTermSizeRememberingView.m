@@ -12,9 +12,16 @@
   NSSize _originalSize;
 }
 
-- (id)initWithFrame:(NSRect)frame {
+- (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
-    _originalSize = frame.size;
+    if (self) {
+        _originalSize = frame.size;
+#ifdef MAC_OS_VERSION_26_0
+        if (@available(macOS 26, *)) {
+            self.prefersCompactControlSizeMetrics = YES;
+        }
+#endif
+    }
     return self;
 }
 
@@ -28,4 +35,11 @@
     [self setFrameSize:_originalSize];
 }
 
+- (void)viewDidChangeEffectiveAppearance {
+    [self.delegate sizeRememberingView:self effectiveAppearanceDidChange:self.effectiveAppearance];
+}
+
+@end
+
+@implementation iTermPrefsProfilesGeneralView
 @end

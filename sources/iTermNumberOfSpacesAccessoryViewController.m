@@ -9,6 +9,9 @@
 #import "iTermNumberOfSpacesAccessoryViewController.h"
 #import "iTermPreferences.h"
 
+@interface iTermNumberOfSpacesAccessoryViewController()<NSControlTextEditingDelegate>
+@end
+
 @implementation iTermNumberOfSpacesAccessoryViewController {
     int _numberOfSpaces;
     IBOutlet NSTextField *_textField;
@@ -16,7 +19,7 @@
 }
 
 - (instancetype)init {
-    return [super initWithNibName:@"NumberOfSpacesAccessoryView" bundle:nil];
+    return [super initWithNibName:@"NumberOfSpacesAccessoryView" bundle:[NSBundle bundleForClass:self.class]];
 }
 
 - (void)awakeFromNib {

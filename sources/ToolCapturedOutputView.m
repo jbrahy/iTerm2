@@ -7,23 +7,36 @@
 //
 
 #import "ToolCapturedOutputView.h"
+#import "SFSymbolEnum/SFSymbolEnum.h"
 
+#import "iTerm2SharedARC-Swift.h"
 #import "CapturedOutput.h"
 #import "CaptureTrigger.h"
-#import "CommandUse.h"
+#import "iTermCapturedOutputMark.h"
+#import "iTermCommandHistoryCommandUseMO+Additions.h"
 #import "iTermSearchField.h"
-#import "iTermToolWrapper.h"
 #import "iTermToolbeltView.h"
+#import "iTermToolWrapper.h"
+#import "NSArray+iTerm.h"
+#import "NSFont+iTerm.h"
+#import "NSImage+iTerm.h"
 #import "NSTableColumn+iTerm.h"
+#import "NSTableView+iTerm.h"
+#import "NSTextField+iTerm.h"
+#import "NSWorkspace+iTerm.h"
 #import "PseudoTerminal.h"
 #import "PTYSession.h"
 #import "ToolCommandHistoryView.h"
 
 static const CGFloat kMargin = 4;
+static const CGFloat kButtonHeight = 23;
+static NSString *const iTermCapturedOutputToolTableViewCellIdentifier = @"ToolCapturedOutputEntryIdentifier";
 
 @interface ToolCapturedOutputView() <
     ToolbeltTool,
     NSMenuDelegate,
+    NSMenuItemValidation,
+    NSSearchFieldDelegate,
     NSTextFieldDelegate>
 @end
 
@@ -32,24 +45,30 @@ static const CGFloat kMargin = 4;
     NSTableView *tableView_;
     BOOL shutdown_;
     NSArray *allCapturedOutput_;
-    NSCell *spareCell_;
-    VT100ScreenMark *mark_;  // Mark from which captured output came
+    NSTableCellView *_measuringCellView;
+    id<VT100ScreenMarkReading> mark_;  // Mark from which captured output came
+    NSInteger _clearCount;
     iTermSearchField *searchField_;
     NSButton *help_;
+    NSButton *_clearButton;
     NSArray *filteredEntries_;
+    BOOL _ignoreClick;
+    NSString *_clearedMark;
+    long long _clearedAbsLineNumber;
 }
 
 @synthesize tableView = tableView_;
 
-- (id)initWithFrame:(NSRect)frame {
+- (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        spareCell_ = [[self cell] retain];
-        
         help_ = [[NSButton alloc] initWithFrame:CGRectZero];
-        [help_ setBezelStyle:NSHelpButtonBezelStyle];
-        [help_ setButtonType:NSMomentaryPushInButton];
+        [help_ setBezelStyle:NSBezelStyleHelpButton];
+        [help_ setButtonType:NSButtonTypeMomentaryPushIn];
         [help_ setBordered:YES];
+        if (@available(macOS 10.16, *)) {
+            help_.controlSize = NSControlSizeSmall;
+        }
         [help_ sizeToFit];
         help_.target = self;
         help_.action = @selector(help:);
@@ -57,41 +76,49 @@ static const CGFloat kMargin = 4;
         [help_ setAutoresizingMask:NSViewMinXMargin];
         [self addSubview:help_];
 
+        _clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, frame.size.height - kButtonHeight, frame.size.width, kButtonHeight)];
+        [_clearButton setTarget:self];
+        [_clearButton setAction:@selector(clear:)];
+        [_clearButton setAutoresizingMask:NSViewMinYMargin];
+        if (@available(macOS 10.16, *)) {
+            _clearButton.bezelStyle = NSBezelStyleRegularSquare;
+            _clearButton.bordered = NO;
+            _clearButton.image = [NSImage it_imageForSymbolName:SFSymbolGetString(SFSymbolTrash) accessibilityDescription:@"Clear"];
+            _clearButton.imagePosition = NSImageOnly;
+            _clearButton.frame = NSMakeRect(0, 0, 22, 22);
+        } else {
+            [_clearButton setTitle:@"Clear"];
+            [_clearButton setButtonType:NSButtonTypeMomentaryPushIn];
+            [_clearButton setBezelStyle:NSBezelStyleSmallSquare];
+            [_clearButton sizeToFit];
+        }
+        [self addSubview:_clearButton];
+
         searchField_ = [[iTermSearchField alloc] initWithFrame:CGRectZero];
         [searchField_ sizeToFit];
         searchField_.autoresizingMask = NSViewWidthSizable;
         searchField_.frame = NSMakeRect(0, 0, frame.size.width, searchField_.frame.size.height);
+        ITERM_IGNORE_PARTIAL_BEGIN
         [searchField_ setDelegate:self];
+        ITERM_IGNORE_PARTIAL_END
         [self addSubview:searchField_];
 
-        scrollView_ = [[NSScrollView alloc] initWithFrame:CGRectZero];
-        [scrollView_ setHasVerticalScroller:YES];
-        [scrollView_ setHasHorizontalScroller:NO];
-        [scrollView_ setBorderType:NSBezelBorder];
-        NSSize contentSize = [scrollView_ contentSize];
-        [scrollView_ setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-
-        tableView_ = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
-        NSTableColumn *col;
-        col = [[[NSTableColumn alloc] initWithIdentifier:@"contents"] autorelease];
-        [col setEditable:NO];
-        [tableView_ addTableColumn:col];
-        [[col headerCell] setStringValue:@"Contents"];
-        NSFont *theFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-        [[col dataCell] setFont:theFont];
-        tableView_.rowHeight = col.suggestedRowHeight;
-        [tableView_ setHeaderView:nil];
-        [tableView_ setDataSource:self];
-        [tableView_ setDelegate:self];
-        NSSize spacing = tableView_.intercellSpacing;
-        spacing.height += 5;
-        tableView_.intercellSpacing = spacing;
+        scrollView_ = [NSScrollView scrollViewWithTableViewForToolbeltWithContainer:self
+                                                                             insets:NSEdgeInsetsZero];
+        tableView_ = scrollView_.documentView;
+        if (@available(macOS 10.16, *)) { } else {
+            NSSize spacing = tableView_.intercellSpacing;
+            spacing.height += 5;
+            tableView_.intercellSpacing = spacing;
+        }
 
         [tableView_ setDoubleAction:@selector(doubleClickOnTableView:)];
-        [tableView_ setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+        tableView_.target = self;
+        tableView_.action = @selector(didClick:);
 
-        tableView_.menu = [[[NSMenu alloc] init] autorelease];
+        tableView_.menu = [[NSMenu alloc] init];
         tableView_.menu.delegate = self;
+        tableView_.intercellSpacing = NSMakeSize(0, 2);
         NSMenuItem *item;
         item = [[NSMenuItem alloc] initWithTitle:@"Toggle Checkmark"
                                           action:@selector(toggleCheckmark:)
@@ -100,13 +127,8 @@ static const CGFloat kMargin = 4;
 
         [searchField_ setArrowHandler:tableView_];
 
-        [scrollView_ setDocumentView:tableView_];
-        [self addSubview:scrollView_];
-
-        [tableView_ setColumnAutoresizingStyle:NSTableViewSequentialColumnAutoresizingStyle];
-
         [self relayout];
-        
+
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(capturedOutputDidChange:)
                                                      name:kPTYSessionCapturedOutputDidChange
@@ -116,19 +138,21 @@ static const CGFloat kMargin = 4;
     return self;
 }
 
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [tableView_ release];
-    [scrollView_ release];
-    [spareCell_ release];
-    [super dealloc];
++ (ProfileType)supportedProfileTypes {
+    return ProfileTypeTerminal;
+}
+
+- (void)removeSelection {
+    mark_ = nil;
+    [tableView_ selectRowIndexes:[NSIndexSet indexSet] byExtendingSelection:NO];
+    [self updateCapturedOutput];
 }
 
 - (void)updateCapturedOutput {
     iTermToolWrapper *wrapper = self.toolWrapper;
     ToolCommandHistoryView *commandHistoryView = [wrapper.delegate commandHistoryView];
-    CommandUse *commandUse = [commandHistoryView selectedCommandUse];
-    VT100ScreenMark *mark;
+    iTermCommandHistoryCommandUseMO *commandUse = [commandHistoryView selectedCommandUse];
+    id<VT100ScreenMarkReading> mark;
     NSArray *theArray;
     if (commandUse) {
         mark = commandUse.mark;
@@ -136,17 +160,26 @@ static const CGFloat kMargin = 4;
         mark = [wrapper.delegate.delegate toolbeltLastCommandMark];
     }
     theArray = mark.capturedOutput;
+    if ([_clearedMark isEqualToString:mark.guid]) {
+        theArray = [theArray filteredArrayUsingBlock:^BOOL(id<CapturedOutputReading> co) {
+            return co.absoluteLineNumber > _clearedAbsLineNumber;
+        }];
+    } else {
+        _clearedMark = nil;
+        _clearedAbsLineNumber = 0;
+    }
     if (mark != mark_) {
         [tableView_ selectRowIndexes:[NSIndexSet indexSet] byExtendingSelection:NO];
-        [mark_ autorelease];
-        mark_ = [mark retain];
+        mark_ = mark;
+        _clearCount = mark.clearCount;
+    } else if (mark.clearCount > _clearCount) {
+        _clearCount = mark.clearCount;
+        theArray = @[];
     }
 
-    [allCapturedOutput_ release];
     allCapturedOutput_ = [theArray copy];
 
     // Now update filtered entries based on search string.
-    [filteredEntries_ release];
     NSMutableArray *temp = [NSMutableArray array];
     for (CapturedOutput *capturedOutput in allCapturedOutput_) {
         if (!searchField_.stringValue.length ||
@@ -155,7 +188,7 @@ static const CGFloat kMargin = 4;
             [temp addObject:capturedOutput];
         }
     }
-    filteredEntries_ = [temp retain];
+    filteredEntries_ = temp;
 
     [tableView_ reloadData];
 
@@ -168,33 +201,60 @@ static const CGFloat kMargin = 4;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    [self relayout];
+}
+
 - (void)relayout {
     NSRect frame = self.frame;
 
     // Search field
     NSRect searchFieldFrame = NSMakeRect(0,
                                          0,
-                                         frame.size.width - help_.frame.size.width - kMargin,
+                                         frame.size.width - help_.frame.size.width - _clearButton.frame.size.width - 2 * kMargin,
                                          searchField_.frame.size.height);
     searchField_.frame = searchFieldFrame;
-    
-    // Help button
-    help_.frame = NSMakeRect(frame.size.width - help_.frame.size.width,
-                             1,
-                             help_.frame.size.width,
-                             help_.frame.size.height);
 
+    // Help button
+    {
+        CGFloat fudgeFactor = 1;
+        if (@available(macOS 10.16, *)) {
+            fudgeFactor = 2;
+        }
+        help_.frame = NSMakeRect(frame.size.width - help_.frame.size.width,
+                                 fudgeFactor,
+                                 help_.frame.size.width,
+                                 help_.frame.size.height);
+    }
+
+    // Clear button
+    {
+        CGFloat fudgeFactor = 1;
+        if (@available(macOS 10.15, *)) {
+            fudgeFactor = 0;
+        }
+        _clearButton.frame = NSMakeRect(help_.frame.origin.x - _clearButton.frame.size.width - kMargin,
+                                        fudgeFactor,
+                                        _clearButton.frame.size.width,
+                                        _clearButton.frame.size.height);
+    }
+    
     // Scroll view
     [scrollView_ setFrame:NSMakeRect(0,
                                      searchFieldFrame.size.height + kMargin,
                                      frame.size.width,
-                                     frame.size.height - 2 * kMargin)];
+                                     frame.size.height - kMargin - (searchFieldFrame.size.height + kMargin))];
 
     // Table view
     NSSize contentSize = [scrollView_ contentSize];
     NSTableColumn *column = tableView_.tableColumns[0];
-    column.minWidth = contentSize.width;
-    column.maxWidth = contentSize.width;
+    CGFloat fudgeFactor = 0;
+    if (@available(macOS 10.16, *)) {
+        fudgeFactor = 32;
+    }
+    column.minWidth = contentSize.width - fudgeFactor;
+    column.maxWidth = contentSize.width - fudgeFactor;
     [tableView_ sizeToFit];
     [tableView_ reloadData];
 }
@@ -203,23 +263,51 @@ static const CGFloat kMargin = 4;
     return YES;
 }
 
+- (void)clear:(id)sender {
+    _clearedAbsLineNumber = mark_.capturedOutput.lastObject.absoluteLineNumber;
+    _clearedMark = mark_.guid;
+    allCapturedOutput_ = [[NSMutableArray alloc] init];
+    filteredEntries_ = [[NSMutableArray alloc] init];
+
+    [tableView_ reloadData];
+
+    // Updating the table data causes the cursor to change into an arrow!
+    [self performSelector:@selector(fixCursor) withObject:nil afterDelay:0];
+}
+
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)aTableView {
+    _clearButton.enabled = (filteredEntries_.count > 0);
     return filteredEntries_.count;
 }
 
-- (id)tableView:(NSTableView *)aTableView
-        objectValueForTableColumn:(NSTableColumn *)aTableColumn
-                              row:(NSInteger)rowIndex {
-    CapturedOutput *capturedOutput = filteredEntries_[rowIndex];
-    return [self labelForCapturedOutput:capturedOutput];
+- (NSTableCellView *)newCellViewWithString:(NSString *)string {
+    NSTableCellView *cell = [tableView_ newTableCellViewWithTextFieldUsingIdentifier:iTermCapturedOutputToolTableViewCellIdentifier
+                                                                                font:[NSFont it_toolbeltFont]
+                                                                              string:string];
+    NSTextField *textField = cell.textField;
+    textField.maximumNumberOfLines = 0;
+    textField.lineBreakMode = NSLineBreakByCharWrapping;
+    textField.usesSingleLineMode = NO;
+    textField.font = [NSFont it_toolbeltFont];
+    return cell;
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    CapturedOutput *capturedOutput = filteredEntries_[row];
+    NSString *value = [self labelForCapturedOutput:capturedOutput];
+    NSTableCellView *result = [self newCellViewWithString:value];
+    result.textField.maximumNumberOfLines = 0;
+    result.textField.lineBreakMode = NSLineBreakByCharWrapping;
+    result.textField.toolTip = value;
+    return result;
 }
 
 - (NSString *)labelForCapturedOutput:(CapturedOutput *)capturedOutput {
     NSString *label = capturedOutput.line;
     if (capturedOutput.state) {
-        label = [@"✔ " stringByAppendingString:label];
+        label = [@"✔" stringByAppendingString:label];
     } else {
-        label = [@"🔹 " stringByAppendingString:label];
+        label = [@"-" stringByAppendingString:label];
     }
     return label;
 }
@@ -227,9 +315,15 @@ static const CGFloat kMargin = 4;
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)rowIndex {
     CapturedOutput *capturedOutput = filteredEntries_[rowIndex];
     NSString *label = [self labelForCapturedOutput:capturedOutput];
-    [spareCell_ setStringValue:label];
-    NSRect constrainedBounds = NSMakeRect(0, 0, tableView_.frame.size.width, CGFLOAT_MAX);
-    NSSize naturalSize = [spareCell_ cellSizeForBounds:constrainedBounds];
+    if (!_measuringCellView) {
+        _measuringCellView = [self newCellViewWithString:label];
+    }
+    // https://stackoverflow.com/a/42853810/321984
+    [_measuringCellView.textField setStringValue:label];
+    _measuringCellView.frame = NSMakeRect(0, 0, tableView_.frame.size.width, 0);
+    _measuringCellView.needsLayout = YES;
+    [_measuringCellView layoutSubtreeIfNeeded];
+    NSSize naturalSize = [_measuringCellView fittingSize];
     return naturalSize.height;
 }
 
@@ -240,7 +334,7 @@ static const CGFloat kMargin = 4;
 }
 
 - (NSCell *)cell {
-    NSCell *cell = [[[NSTextFieldCell alloc] init] autorelease];
+    NSCell *cell = [[NSTextFieldCell alloc] init];
     [cell setEditable:NO];
     [cell setLineBreakMode:NSLineBreakByWordWrapping];
     [cell setWraps:YES];
@@ -248,6 +342,14 @@ static const CGFloat kMargin = 4;
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    _ignoreClick = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_ignoreClick = NO;
+    });
+    [self revealSelection];
+}
+
+- (void)revealSelection {
     NSInteger selectedIndex = [tableView_ selectedRow];
     if (selectedIndex < 0) {
         return;
@@ -283,7 +385,7 @@ static const CGFloat kMargin = 4;
 }
 
 - (CGFloat)minimumHeight {
-    return 60;
+    return 91;
 }
 
 - (void)toggleCheckmark:(id)sender {
@@ -293,6 +395,13 @@ static const CGFloat kMargin = 4;
         capturedOutput.state = !capturedOutput.state;
     }
     [tableView_ reloadData];
+}
+
+- (void)didClick:(id)sender {
+    if (_ignoreClick) {
+        return;
+    }
+    [self revealSelection];
 }
 
 #pragma mark - NSMenuDelegate
@@ -307,10 +416,21 @@ static const CGFloat kMargin = 4;
     [self updateCapturedOutput];
 }
 
+- (NSArray *)control:(NSControl *)control
+            textView:(NSTextView *)textView
+         completions:(NSArray *)words
+ forPartialWordRange:(NSRange)charRange
+ indexOfSelectedItem:(NSInteger *)index {
+    return @[];
+}
+
 #pragma mark - Actions
 
 - (void)help:(id)sender {
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"http://iterm2.com/captured_output.html"]];
+    [[NSWorkspace sharedWorkspace] it_openURL:[NSURL URLWithString:@"http://iterm2.com/captured_output.html"]
+                                       target:nil
+                                        style:iTermOpenStyleTab
+                                       window:self.window];
 }
 
 @end

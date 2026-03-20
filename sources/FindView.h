@@ -27,11 +27,15 @@
 
 #import <Cocoa/Cocoa.h>
 
-
-@interface FindView : NSView {
-
-}
-
-- (void)drawRect:(NSRect)rect;
-
+@interface FindView : NSView
 @end
+
+@protocol MinimalFindViewDelegate<NSObject>
+- (void)minimalFindViewDidLayout;
+@end
+
+@interface MinimalFindView : NSView
+@property (nonatomic, strong) IBOutlet NSButton *closeButton;
+@property (nonatomic, weak) IBOutlet id<MinimalFindViewDelegate> delegate;
+@end
+

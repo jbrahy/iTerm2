@@ -7,6 +7,9 @@
 //
 
 #import "PasteViewController.h"
+
+#import "iTermAdvancedSettingsModel.h"
+#import "NSColor+iTerm.h"
 #import "PasteContext.h"
 #import "PasteView.h"
 #import "PseudoTerminal.h"
@@ -14,23 +17,42 @@
 
 static float kAnimationDuration = 0.25;
 
+static NSString *iTermPasteViewControllerNibName(BOOL mini) {
+    if (mini) {
+        return @"MiniPasteView";
+    }
+    if ([iTermAdvancedSettingsModel useOldStyleDropDownViews]) {
+        return @"PasteView";
+    }
+    return @"MinimalPasteView";
+}
+
 @implementation PasteViewController {
     IBOutlet NSTextField *_label;
+    IBOutlet NSProgressIndicator *progressIndicator_;
+    int totalLength_;
+    PasteContext *pasteContext_;
 }
 
 @synthesize delegate = delegate_;
+@synthesize remainingLength = remainingLength_;
 
-- (id)initWithContext:(PasteContext *)pasteContext
-               length:(int)length {
-    self = [super initWithNibName:@"PasteView" bundle:nil];
+- (instancetype)initWithContext:(PasteContext *)pasteContext
+                         length:(int)length
+                           mini:(BOOL)mini {
+    self = [super initWithNibName:iTermPasteViewControllerNibName(mini)
+                           bundle:[NSBundle bundleForClass:self.class]];
     if (self) {
         [self view];
+        _mini = mini;
 
-        // Fix up frames beacuse the view is flipped.
-        for (NSView *view in [self.view subviews]) {
-            NSRect frame = [view frame];
-            frame.origin.y = NSMaxY([self.view bounds]) - NSMaxY([view frame]);
-            [view setFrame:frame];
+        if (self.view.flipped) {
+            // Fix up frames because the view is flipped.
+            for (NSView *view in [self.view subviews]) {
+                NSRect frame = [view frame];
+                frame.origin.y = NSMaxY([self.view bounds]) - NSMaxY([view frame]);
+                [view setFrame:frame];
+            }
         }
         pasteContext_ = [pasteContext retain];
         totalLength_ = remainingLength_ = length;
@@ -48,6 +70,32 @@ static float kAnimationDuration = 0.25;
     [super dealloc];
 }
 
+- (void)awakeFromNib {
+    if (pasteContext_.isUpload) {
+        _label.stringValue = @"Sending…";
+    }
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    if (_mini) {
+        return;
+    }
+    if ([iTermAdvancedSettingsModel useOldStyleDropDownViews]) {
+        return;
+    }
+
+    NSShadow *shadow = [[[NSShadow alloc] init] autorelease];
+    shadow.shadowOffset = NSMakeSize(2, -2);
+    shadow.shadowColor = [NSColor colorWithWhite:0 alpha:0.3];
+    shadow.shadowBlurRadius = 2;
+
+    self.view.wantsLayer = YES;
+    [self.view makeBackingLayer];
+    self.view.shadow = shadow;
+}
+
 - (void)viewDidAppear {
     [self updateLabelColor];
 }
@@ -55,7 +103,15 @@ static float kAnimationDuration = 0.25;
 - (void)updateLabelColor {
     PseudoTerminal* term = [[self.view window] windowController];
     if ([term isKindOfClass:[PseudoTerminal class]]) {
-        _label.textColor = [term accessoryTextColor];
+        _label.textColor = [term accessoryTextColorForMini:self.mini];
+    }
+    if (!self.mini) {
+        return;
+    }
+    if (_label.textColor.perceivedBrightness > 0.5) {
+        progressIndicator_.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    } else {
+        progressIndicator_.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     }
 }
 
@@ -82,15 +138,19 @@ static float kAnimationDuration = 0.25;
                           self.view.frame.size.width,
                           self.view.frame.size.height);
     [[NSAnimationContext currentContext] setDuration:kAnimationDuration];
-    [[self.view animator] setFrame:newFrame];
+    self.view.frame = newFrame;
+    self.view.animator.alphaValue = 1;
 }
 
-- (void)close {
+- (void)closeWithCompletion:(void (^)(void))completion {
     NSRect newFrame = self.view.frame;
     newFrame.origin.y = self.view.superview.frame.size.height;
     [[NSAnimationContext currentContext] setDuration:kAnimationDuration];
-    [[self.view animator] setFrame:newFrame];
+    self.view.animator.alphaValue = 0;
     [self.view performSelector:@selector(removeFromSuperview) withObject:nil afterDelay:kAnimationDuration];
+    [[NSAnimationContext currentContext] setCompletionHandler:^{
+        completion();
+    }];
 }
 
 - (void)themeDidChange:(id)sender {

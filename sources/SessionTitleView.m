@@ -7,10 +7,18 @@
 //
 
 #import "SessionTitleView.h"
+#import "iTermAdvancedSettingsModel.h"
+#import "iTermHamburgerButton.h"
 #import "iTermPreferences.h"
+#import "iTermStatusBarViewController.h"
+#import "NSAppearance+iTerm.h"
+#import "NSColor+iTerm.h"
 #import "NSImage+iTerm.h"
 #import "NSStringITerm.h"
+#import "PSMMinimalTabStyle.h"
 #import "PSMTabBarControl.h"
+#import "PTYWindow.h"
+#import "SFSymbolEnum.h"
 
 const double kBottomMargin = 0;
 static const CGFloat kButtonSize = 17;
@@ -29,30 +37,26 @@ static const CGFloat kButtonSize = 17;
 @end
 
 @implementation SessionTitleView {
-    NSString *title_;
     NSTextField *label_;
     NSButton *closeButton_;
-    NSPopUpButton *menuButton_;
-    NSObject<SessionTitleViewDelegate> *delegate_;
-    double dimmingAmount_;
+    NSButton *lockButton_;
+    iTermHamburgerButton *menuButton_;
 }
 
 @synthesize title = title_;
 @synthesize delegate = delegate_;
 @synthesize dimmingAmount = dimmingAmount_;
+@synthesize statusBarViewController = _statusBarViewController;
 
-- (id)initWithFrame:(NSRect)frame {
+static const double kMargin = 5;
+static const CGFloat kLockButtonSize = 14;
+
+- (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        const double kMargin = 5;
-        double x = kMargin;
-
-        NSImage *closeImage = [NSImage imageNamed:@"closebutton"];
-        closeButton_ = [[[NoFirstResponderButton alloc] initWithFrame:NSMakeRect(x,
-                                                                                 (frame.size.height - kButtonSize) / 2,
-                                                                                 kButtonSize,
-                                                                                 kButtonSize)] autorelease];
-        [closeButton_ setButtonType:NSMomentaryPushInButton];
+        NSImage *closeImage = [NSImage it_imageNamed:@"closebutton" forClass:self.class];
+        closeButton_ = [[NoFirstResponderButton alloc] initWithFrame:NSMakeRect(0, 0, kButtonSize, kButtonSize)];
+        [closeButton_ setButtonType:NSButtonTypeMomentaryPushIn];
         [closeButton_ setImage:closeImage];
         [closeButton_ setTarget:self];
         [closeButton_ setAction:@selector(close:)];
@@ -61,35 +65,39 @@ static const CGFloat kButtonSize = 17;
         [[closeButton_ cell] setHighlightsBy:NSContentsCellMask];
         [self addSubview:closeButton_];
 
-        x += closeButton_.frame.size.width + kMargin;
-        // Popup buttons want to have huge margins on the sides. This one look best right up against
-        // the right margin, though. So I'll make it as small as it can be and then push it right so
-        // some of it is clipped.
-        menuButton_ = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 36, 16.0) pullsDown:YES];
-        [(NSPopUpButtonCell *)[menuButton_ cell] setBezeled:NO];
-        [[menuButton_ cell] setArrowPosition:NSPopUpNoArrow];
-        [menuButton_ setBordered:NO];
-        [menuButton_ addItemWithTitle:@""];
-        NSMenuItem *item = [menuButton_ itemAtIndex:0];
-        [self setImagesForActionItem:item];
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(popupWillOpen:)
-                                                     name:NSPopUpButtonWillPopUpNotification
-                                                   object:menuButton_];
+        __weak __typeof(self) weakSelf = self;
+        menuButton_ = [[iTermHamburgerButton alloc] initWithMenuProvider:^NSMenu * _Nonnull {
+            return [weakSelf menu];
+        }];
+
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(modifierShortcutDidChange:)
                                                      name:kPSMModifierChangedNotification
                                                    object:nil];
-        [menuButton_ addItemWithTitle:@"Foo"];
 
-        menuButton_.frame = NSMakeRect(frame.size.width - menuButton_.frame.size.width + 6,
-                                       (frame.size.height - menuButton_.frame.size.height) / 2 + 1,
-                                       menuButton_.frame.size.width,
-                                       menuButton_.frame.size.height);
-        [menuButton_ setAutoresizingMask:NSViewMinXMargin];
+        // Menu button - positioned at right edge
         [self addSubview:menuButton_];
 
-        label_ = [[[NSTextField alloc] initWithFrame:NSMakeRect(x, 0, menuButton_.frame.origin.x - x - kMargin, frame.size.height)] autorelease];
+        // Create lock button - positioned to the left of menu button, hidden by default
+        NSImage *lockImage = [NSImage imageWithSystemSymbolName:SFSymbolGetString(SFSymbolLockFill)
+                                         accessibilityDescription:@"Pane is locked"];
+        NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithPointSize:11 weight:NSFontWeightMedium];
+        lockImage = [lockImage imageWithSymbolConfiguration:config];
+
+        lockButton_ = [[NoFirstResponderButton alloc] initWithFrame:NSMakeRect(0, 0, kLockButtonSize, kLockButtonSize)];
+        [lockButton_ setButtonType:NSButtonTypeMomentaryPushIn];
+        [lockButton_ setImage:lockImage];
+        [lockButton_ setTarget:self];
+        [lockButton_ setAction:@selector(toggleLock:)];
+        [lockButton_ setBordered:NO];
+        [lockButton_ setTitle:@""];
+        [lockButton_ setToolTip:@"This pane is locked. It cannot be moved, swapped, or dragged, and closing it requires confirmation. Right-click to unlock."];
+        [[lockButton_ cell] setHighlightsBy:NSContentsCellMask];
+        [lockButton_ setHidden:YES]; // Hidden by default until delegate says it's locked
+        [self addSubview:lockButton_];
+
+        label_ = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, frame.size.height)];
+        label_.lineBreakMode = NSLineBreakByTruncatingTail;
         [label_ setStringValue:@""];
         [label_ setBezeled:NO];
         [label_ setDrawsBackground:NO];
@@ -97,14 +105,13 @@ static const CGFloat kButtonSize = 17;
         [label_ setSelectable:NO];
         [label_ setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
         [label_ sizeToFit];
-        [label_ setAutoresizingMask:NSViewMaxYMargin | NSViewWidthSizable];
 
-        NSRect lframe = label_.frame;
-        lframe.origin.y += (frame.size.height - lframe.size.height) / 2 + kBottomMargin;
-        lframe.size.width = menuButton_.frame.origin.x - x - kMargin;
-        label_.frame = lframe;
         [self addSubview:label_];
 
+        [self layoutSubviews];
+        [menuButton_ setAutoresizingMask:NSViewMinXMargin];
+        [lockButton_ setAutoresizingMask:NSViewMinXMargin]; // Stay at right side
+        [label_ setAutoresizingMask:NSViewMaxYMargin | NSViewWidthSizable];
         [self addCursorRect:NSMakeRect(0, 0, frame.size.width, frame.size.height)
                      cursor:[NSCursor arrowCursor]];
 
@@ -113,36 +120,72 @@ static const CGFloat kButtonSize = 17;
     return self;
 }
 
-- (void)setImagesForActionItem:(NSMenuItem *)item {
-    iTermPreferencesTabStyle preferredStyle = [iTermPreferences intForKey:kPreferenceKeyTabStyle];
-    CGFloat whiteLevel = 0;
-    switch (preferredStyle) {
-        case TAB_STYLE_LIGHT:
-            whiteLevel = 0.45;
-            break;
-        case TAB_STYLE_DARK:
-            whiteLevel = 0.45;
-            break;
-    }
-    NSColor *color = [NSColor colorWithCalibratedWhite:whiteLevel alpha:1];
-    NSImage *theImage = [[NSImage imageNamed:@"NSActionTemplate"] imageWithColor:color];
-    [item setImage:theImage];
-}
-
 - (void)dealloc {
-    [title_ release];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [super dealloc];
 }
 
-- (void)popupWillOpen:(NSNotification *)notification
-{
-    if ([notification object] == menuButton_) {
-        NSMenu *menu = [delegate_ menu];
-        NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""] autorelease];
-        [menu insertItem:item atIndex:0];
-        [self setImagesForActionItem:item];
-        [menuButton_ setMenu:menu];
+- (void)layoutSubviews {
+    const NSRect frame = self.frame;
+    double x = kMargin;
+    closeButton_.frame = NSMakeRect(x,
+                                    (frame.size.height - kButtonSize) / 2,
+                                    kButtonSize,
+                                    kButtonSize);
+    x += closeButton_.frame.size.width + kMargin;
+    menuButton_.frame = NSMakeRect(frame.size.width - menuButton_.image.size.width - 6,
+                                   (frame.size.height - menuButton_.image.size.height) / 2,
+                                   menuButton_.image.size.width,
+                                   menuButton_.image.size.height);
+    lockButton_.frame = NSMakeRect(menuButton_.frame.origin.x - kMargin - kLockButtonSize,
+                                   (frame.size.height - kLockButtonSize) / 2,
+                                   kLockButtonSize,
+                                   kLockButtonSize);
+    [label_ sizeToFit];
+    NSRect lframe = label_.frame;
+    lframe.origin.x = x;
+    lframe.origin.y = (frame.size.height - lframe.size.height) / 2 + kBottomMargin;
+    lframe.size.width = menuButton_.frame.origin.x - x - kMargin;
+    if (!lockButton_.isHidden) {
+        lframe.size.width -= kMargin + kLockButtonSize;
+    }
+    label_.frame = lframe;
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    DLog(@"%@", event);
+    [super scrollWheel:event];
+}
+
+- (NSMenu *)menu {
+    return delegate_.menu;
+}
+
+- (void)setStatusBarViewController:(iTermStatusBarViewController *)statusBarViewController {
+    [_statusBarViewController.view removeFromSuperview];
+    _statusBarViewController = statusBarViewController;
+    if (statusBarViewController) {
+        [self addSubview:statusBarViewController.view];
+    }
+    [self layoutStatusBar];
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    [self layoutStatusBar];
+}
+
+- (void)layoutStatusBar {
+    if (_statusBarViewController) {
+        const CGFloat margin = 5;
+        const CGFloat minX = NSMaxX(closeButton_.frame) + margin;
+        _statusBarViewController.view.frame = NSMakeRect(minX,
+                                                         1,
+                                                         NSMinX(menuButton_.frame) - margin - minX,
+                                                         self.frame.size.height);
+        label_.hidden = YES;
+    } else {
+        // You can have either a label or a status bar but not both.
+        label_.hidden = NO;
     }
 }
 
@@ -151,66 +194,57 @@ static const CGFloat kButtonSize = 17;
     [delegate_ close];
 }
 
-- (NSColor *)dimmedColor:(NSColor *)origColor
-{
-    NSColor *color = [origColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
-    double r = [color redComponent];
-    double g = [color greenComponent];
-    double b = [color blueComponent];
-    double alpha = 1 - dimmingAmount_;
-    r = alpha * r + (1 - alpha) * 0.85;
-    g = alpha * g + (1 - alpha) * 0.85;
-    b = alpha * b + (1 - alpha) * 0.85;
-    return [NSColor colorWithCalibratedRed:r green:g blue:b alpha:1];
+- (void)toggleLock:(id)sender {
+    [delegate_ sessionTitleViewToggleLock];
+    [self updateLockButton];
 }
 
-- (NSColor *)dimmedBackgroundColor {
-    iTermPreferencesTabStyle preferredStyle = [iTermPreferences intForKey:kPreferenceKeyTabStyle];
-    CGFloat whiteLevel = 0;
-    switch (preferredStyle) {
-        case TAB_STYLE_LIGHT:
-            if (dimmingAmount_ > 0) {
-                // Not selected
-                whiteLevel = 0.58;
-            } else {
-                // selected
-                whiteLevel = 0.70;
-            }
-            break;
-        case TAB_STYLE_DARK:
-            if (dimmingAmount_ > 0) {
-                // Not selected
-                whiteLevel = 0.22;
-            } else {
-                // selected
-                whiteLevel = 0.27;
-            }
-            break;
-    }
-
-    return [NSColor colorWithCalibratedWhite:whiteLevel alpha:1];
+- (void)updateLockButton {
+    BOOL locked = [delegate_ sessionTitleViewIsLocked];
+    [lockButton_ setHidden:!locked];
+    [self layoutSubviews];
+    [self setNeedsDisplay:YES];
 }
 
-- (void)drawRect:(NSRect)dirtyRect
-{
-    NSColor *tabColor = delegate_.tabColor;
-    if (tabColor) {
-        [[self dimmedColor:tabColor] set];
-    } else {
-        [[self dimmedBackgroundColor] set];
-    }
+- (void)drawRect:(NSRect)insaneRect {
+    const NSRect dirtyRect = NSIntersectionRect(insaneRect, self.bounds);
+    NSColor *color = [self.delegate sessionTitleViewBackgroundColor];
+    [color set];
     NSRectFill(dirtyRect);
 
-    [[NSColor blackColor] set];
-    NSRectFill(NSMakeRect(dirtyRect.origin.x, 0, dirtyRect.size.width, 1));
+    if (!self.window.ptyWindow.it_terminalWindowUseMinimalStyle) {
+        if ([color perceivedBrightness] > 0.5) {
+            [[[NSColor blackColor] colorWithAlphaComponent:0.25] set];
+        } else {
+            [[[NSColor whiteColor] colorWithAlphaComponent:0.25] set];
+        }
+        NSRectFillUsingOperation(NSMakeRect(dirtyRect.origin.x, 0, dirtyRect.size.width, 1), NSCompositingOperationSourceOver);
+    }
 
-    [super drawRect:dirtyRect];
+    [super drawRect:insaneRect];
+}
+
+- (void)setDelegate:(id<SessionTitleViewDelegate>)delegate {
+    delegate_ = delegate;
+    [self updateBackgroundColor];
+}
+
+- (void)updateBackgroundColor {
+    if (@available(macOS 10.16, *)) {
+        return;
+    }
+    label_.backgroundColor = [self.delegate sessionTitleViewBackgroundColor];
+    label_.drawsBackground = YES;
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setTitle:(NSString *)title {
-    [title_ autorelease];
+    if ([title isEqualToString:title_]) {
+        return;
+    }
     title_ = [title copy];
     [self updateTitle];
+    [self setNeedsDisplay:YES];
 }
 
 - (NSString *)titleString {
@@ -224,15 +258,19 @@ static const CGFloat kButtonSize = 17;
             break;
 
         case kPreferencesModifierTagEitherCommand:
-            prefix = [NSString stringForModifiersWithMask:NSCommandKeyMask];
+            prefix = [NSString stringForModifiersWithMask:NSEventModifierFlagCommand];
             break;
 
         case kPreferencesModifierTagEitherOption:
-            prefix = [NSString stringForModifiersWithMask:NSAlternateKeyMask];
+            prefix = [NSString stringForModifiersWithMask:NSEventModifierFlagOption];
             break;
 
         case kPreferencesModifierTagCommandAndOption:
-            prefix = [NSString stringForModifiersWithMask:(NSCommandKeyMask | NSAlternateKeyMask)];
+            prefix = [NSString stringForModifiersWithMask:(NSEventModifierFlagCommand | NSEventModifierFlagOption)];
+            break;
+
+        case kPreferencesModifierTagLegacyRightControl:
+            prefix = [NSString stringForModifiersWithMask:NSEventModifierFlagControl];
             break;
     }
     return [NSString stringWithFormat:@"%@%@   %@", prefix, @(_ordinal), title_];
@@ -247,12 +285,34 @@ static const CGFloat kButtonSize = 17;
 {
     dimmingAmount_ = value;
     [self updateTextColor];
+    [_statusBarViewController.view setNeedsDisplay:YES];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self updateTextColor];
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [self updateTextColor];
 }
 
 - (void)updateTextColor {
     CGFloat whiteLevel = 0;
     iTermPreferencesTabStyle preferredStyle = [iTermPreferences intForKey:kPreferenceKeyTabStyle];
-    switch (preferredStyle) {
+    if (self.window.ptyWindow.it_terminalWindowUseMinimalStyle) {
+        label_.textColor = [self.window.ptyWindow it_terminalWindowDecorationTextColorForBackgroundColor:[delegate_ sessionTitleViewBackgroundColor]];
+        menuButton_.contentTintColor = [NSColor secondaryLabelColor];
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    switch ([self.effectiveAppearance it_tabStyle:preferredStyle]) {
+        case TAB_STYLE_AUTOMATIC:
+        case TAB_STYLE_COMPACT:
+        case TAB_STYLE_MINIMAL:
+            assert(NO);
+            
         case TAB_STYLE_LIGHT:
             if (dimmingAmount_ > 0) {
                 // Not selected
@@ -262,23 +322,48 @@ static const CGFloat kButtonSize = 17;
                 whiteLevel = 0.2;
             }
             break;
+
+        case TAB_STYLE_LIGHT_HIGH_CONTRAST:
+            whiteLevel = 0;
+            break;
+
         case TAB_STYLE_DARK:
             if (dimmingAmount_ > 0) {
                 // Not selected
-                whiteLevel = 0.4;
+                whiteLevel = 0.6;
             } else {
                 // selected
                 whiteLevel = 0.8;
             }
             break;
+
+        case TAB_STYLE_DARK_HIGH_CONTRAST:
+            whiteLevel = 1;
+            break;
     }
     [label_ setTextColor:[NSColor colorWithCalibratedWhite:whiteLevel alpha:1]];
+    menuButton_.contentTintColor = [NSColor secondaryLabelColor];
     [self setNeedsDisplay:YES];
 }
 
-- (void)mouseDragged:(NSEvent *)theEvent
-{
+- (void)mouseDragged:(NSEvent *)theEvent {
+    if ([iTermAdvancedSettingsModel requireOptionToDragSplitPaneTitleBar]) {
+        if ((NSApp.currentEvent.modifierFlags & NSEventModifierFlagOption) == 0) {
+            return;
+        }
+    }
     [delegate_ beginDrag];
+}
+
+- (void)mouseUp:(NSEvent *)theEvent {
+    if (theEvent.clickCount == 2) {
+        [self.delegate doubleClickOnTitleView];
+    } else {
+        if (self.window.firstResponder == self) {
+            [self.delegate sessionTitleViewBecomeFirstResponder];
+        }
+        [super mouseUp:theEvent];
+    }
 }
 
 - (void)setOrdinal:(int)ordinal {

@@ -7,15 +7,32 @@
 //
 
 #import "SCPFile.h"
+#import "iTermUserDefaults.h"
 #import <NMSSH/NMSSH.h>
 #import <NMSSH/NMSSHConfig.h>
 #import <NMSSH/NMSSHHostConfig.h>
 #import <NMSSH/libssh2.h>
+#include <errno.h>
+
+#import "DebugLogging.h"
+#import "ITAddressBookMgr.h"
+#import "NSData+iTerm.h"
 #import "NSFileManager+iTerm.h"
 #import "NSObject+iTerm.h"
 #import "NSStringITerm.h"
+#import "NSWorkspace+iTerm.h"
+#import "ProfileModel.h"
+#import "iTermOpenDirectory.h"
+#import "iTermSSHHelpers.h"
+#import "iTermSlowOperationGateway.h"
+#import "iTermWarning.h"
+
+@interface NMSSHSession(iTerm)
+@property (atomic, readonly) void *agent;
+@end
 
 static NSString *const kSCPFileErrorDomain = @"com.googlecode.iterm2.SCPFile";
+static NSString *const kSecureCopyConnectionFailedWarning = @"NoSyncSecureCopyConnectionFailedWarning";
 
 static NSError *SCPFileError(NSString *description) {
     return [NSError errorWithDomain:kSCPFileErrorDomain
@@ -23,8 +40,65 @@ static NSError *SCPFileError(NSString *description) {
                            userInfo:@{ NSLocalizedDescriptionKey: description }];
 }
 
+@interface iTermAuthSock: NSObject
+@property (nonatomic, readonly) NSString *authSock;
++ (instancetype)sharedInstance;
+@end
+
+@implementation iTermAuthSock {
+    NSString *_authSock;
+    dispatch_group_t _group;
+}
+
++ (instancetype)sharedInstance {
+    static iTermAuthSock *instance;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[self alloc] init];
+    });
+    return instance;
+}
+
+- (NSString *)authSock {
+    Profile *profile = [[ProfileModel sharedInstance] defaultBookmark];
+    NSString *shell = [ITAddressBookMgr customShellForProfile:profile] ?: [iTermOpenDirectory userShell] ?:  @"/bin/bash";
+    dispatch_group_t group;
+    BOOL request = NO;
+    @synchronized(self) {
+        if (_authSock) {
+            return _authSock;
+        }
+        if (!_group) {
+            _group = dispatch_group_create();
+            request = YES;
+        }
+        group = _group;
+    }
+    if (request) {
+        dispatch_group_enter(group);
+        DLog(@"Try to get the value of $SSH_AUTH_SOCK");
+        [[iTermSlowOperationGateway sharedInstance] exfiltrateEnvironmentVariableNamed:@"SSH_AUTH_SOCK"
+                                                                                 shell:shell
+                                                                            completion:^(NSString * _Nonnull value) {
+            @synchronized(self) {
+                self->_authSock = value;
+            }
+            dispatch_group_leave(group);
+            DLog(@"Value is %@", value);
+        }];
+    }
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW,
+                                             0.5 * NSEC_PER_SEC));
+    @synchronized(self) {
+        DLog(@"Return %@", _authSock);
+        return _authSock;
+    }
+}
+
+@end
+
 @interface SCPFile () <NMSSHSessionDelegate>
-@property(atomic, assign) NMSSHSession *session;
+@property(atomic, strong) NMSSHSession *session;
 @property(atomic, assign) BOOL stopped;
 @property(atomic, copy) NSString *error;
 @property(atomic, copy) NSString *destination;
@@ -35,29 +109,29 @@ static NSError *SCPFileError(NSString *description) {
     BOOL _okToAdd;
     BOOL _downloading;
     dispatch_queue_t _queue;
+    NSString *_homeDirectory;
+    NSString *_userName;
+    NSString *_hostName;
+    NSString *_tempArchivePath;  // Path to temp tgz file when uploading a directory
 }
 
-- (id)init {
+- (instancetype)init {
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.googlecode.iterm2.SCPFile", NULL);
+        _homeDirectory = [NSHomeDirectory() copy];
+        _userName = [NSUserName() copy];
+        _hostName = [[[NSHost currentHost] name] copy];
+
     }
     return self;
 }
 
-- (void)dealloc {
-    [_error release];
-    [_destination release];
-    dispatch_release(_queue);
-    [super dealloc];
-}
-
-// In NMSSH 2.0, -[NMSSHSession lastError] crashes if there is no rawSession.
-// When upgrading, remove this method (the bug was fixed in January, 2014).
 - (NSError *)lastError {
   if (self.session.rawSession) {
     return self.session.lastError;
   } else {
+    // The reported error is meaningless without a raw session.
     return nil;
   }
 }
@@ -65,11 +139,7 @@ static NSError *SCPFileError(NSString *description) {
 - (void)setQueue:(dispatch_queue_t)queue {
     @synchronized(self) {
         if (queue != _queue) {
-            dispatch_release(_queue);
             _queue = queue;
-            if (queue) {
-                dispatch_retain(queue);
-            }
         }
     }
 }
@@ -81,7 +151,7 @@ static NSError *SCPFileError(NSString *description) {
 }
 
 - (NSString *)displayName {
-    return [NSString stringWithFormat:@"scp %@@%@:%@", _path.username, _path.hostname, _path.path];
+    return [NSString stringWithFormat:@"Secure copy\nUser name: %@\nHost: %@\nFile: %@", _path.username, _path.hostname, _path.path];
 }
 
 - (NSString *)shortName {
@@ -100,6 +170,14 @@ static NSError *SCPFileError(NSString *description) {
     return [components lastObject];
 }
 
+- (NSString *)authRequestor {
+    return [NSString stringWithFormat:@"%@@%@", _path.username, _path.hostname];
+}
+
+- (NSString *)protocolName {
+    return @"secure copy";
+}
+
 // This runs in a thread.
 - (void)performTransferWrapper:(BOOL)isDownload {
     [self performTransfer:isDownload];
@@ -107,12 +185,19 @@ static NSError *SCPFileError(NSString *description) {
         [self.session disconnect];
     }
     self.session = nil;
+
+    // Clean up temp archive if we created one for a directory upload
+    if (_tempArchivePath) {
+        DLog(@"Cleaning up temp archive: %@", _tempArchivePath);
+        [[NSFileManager defaultManager] removeItemAtPath:_tempArchivePath error:nil];
+        _tempArchivePath = nil;
+    }
 }
 
 - (NSString *)hostname {
     NSArray *hostComponents = [self.path.hostname componentsSeparatedByString:@":"];
     NSInteger components = [hostComponents count];
-    
+
     // Check if the host is {hostname}:{port} or {IPv4}:{port}
     if (components == 2) {
         return hostComponents[0];
@@ -124,30 +209,30 @@ static NSError *SCPFileError(NSString *description) {
         NSString *bracketedHostname = [hostComponents componentsJoinedByString:@":"];
         return [bracketedHostname substringWithRange:NSMakeRange(1, bracketedHostname.length - 2)];
     }
-    
+
     return self.path.hostname;
 }
 
 - (int)port {
     NSArray *hostComponents = [self.path.hostname componentsSeparatedByString:@":"];
     NSInteger components = [hostComponents count];
-    
+
     // Check if the host is {hostname}:{port} or {IPv4}:{port}
     if (components == 2) {
-        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
-        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
-        
+        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     } else if (components >= 4 &&
                [hostComponents[0] hasPrefix:@"["] &&
                [hostComponents[components-2] hasSuffix:@"]"]) {
         // Check if the host is [{IPv6}]:{port}
-        NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
-        [formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
-        
+        NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+        [formatter setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]];
+
         return [[formatter numberFromString:[hostComponents lastObject]] intValue];
     }
-    
+
     // If no port was defined, use 22 by default
     return 22;
 }
@@ -157,39 +242,85 @@ static NSError *SCPFileError(NSString *description) {
         NSString *privateKey = [NSString stringWithContentsOfFile:filename
                                                          encoding:NSUTF8StringEncoding
                                                             error:nil];
-        return [privateKey rangeOfString:@"ENCRYPTED"].location != NSNotFound;
-    }
-}
-
-// This runs in a thread
-- (NSArray *)configs {
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *appSupport = [fileManager applicationSupportDirectory];
-    NSArray *paths = @[ [appSupport stringByAppendingPathExtension:@"iTerm/ssh_config"],
-                        [@"~/.ssh/ssh_config" stringByExpandingTildeInPath],
-                        @"/etc/ssh/ssh_config",
-                        @"/etc/ssh_config" ];
-    NSMutableArray *configs = [NSMutableArray array];
-    for (NSString *path in paths) {
-        if ([fileManager fileExistsAtPath:path]) {
-            NMSSHConfig *config = [NMSSHConfig configFromFile:path];
-            if (config) {
-                [configs addObject:config];
-            } else {
-                NSLog(@"Could not parse config file at %@", path);
-            }
+        if (!privateKey) {
+            return NO;  // Can't read file; auth will fail anyway
         }
+
+        // Traditional PEM format: check for ENCRYPTED header
+        if ([privateKey rangeOfString:@"ENCRYPTED"].location != NSNotFound) {
+            return YES;
+        }
+
+        // OpenSSH new format: parse the cipher field
+        NSString *beginMarker = @"-----BEGIN OPENSSH PRIVATE KEY-----";
+        NSString *endMarker = @"-----END OPENSSH PRIVATE KEY-----";
+        NSRange beginRange = [privateKey rangeOfString:beginMarker];
+        if (beginRange.location == NSNotFound) {
+            return NO;  // Unknown format, assume unencrypted
+        }
+
+        NSRange endRange = [privateKey rangeOfString:endMarker];
+        if (endRange.location == NSNotFound) {
+            return NO;
+        }
+
+        // Extract and decode base64 content
+        NSUInteger start = NSMaxRange(beginRange);
+        NSString *b64 = [privateKey substringWithRange:NSMakeRange(start, endRange.location - start)];
+        b64 = [[b64 componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+               componentsJoinedByString:@""];
+
+        NSData *decoded = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+        if (!decoded || decoded.length < 20) {
+            return NO;
+        }
+
+        const char *bytes = decoded.bytes;
+
+        // Verify AUTH_MAGIC: "openssh-key-v1" + null byte (15 bytes total)
+        if (strncmp(bytes, "openssh-key-v1", 14) != 0 || bytes[14] != '\0') {
+            return NO;
+        }
+
+        // Read cipher name (length-prefixed string at offset 15)
+        NSUInteger offset = 15;
+        if (offset + 4 > decoded.length) {
+            return NO;
+        }
+
+        // Length is 4 bytes big-endian
+        uint32_t cipherLen = ((uint32_t)(uint8_t)bytes[offset] << 24) |
+                             ((uint32_t)(uint8_t)bytes[offset + 1] << 16) |
+                             ((uint32_t)(uint8_t)bytes[offset + 2] << 8) |
+                             ((uint32_t)(uint8_t)bytes[offset + 3]);
+        offset += 4;
+
+        if (offset + cipherLen > decoded.length) {
+            return NO;
+        }
+
+        // If cipher is "none", key is unencrypted
+        if (cipherLen == 4 && strncmp(bytes + offset, "none", 4) == 0) {
+            return NO;
+        }
+
+        return YES;  // Encrypted with some cipher
     }
-    return configs;
+}
+
+
+// This runs in a thread
++ (NSArray<NMSSHConfig *> *)configs {
+    return [iTermSSHHelpers configs];
 }
 
 // This runs in a thread
-- (NSString *)filenameByExpandingMetasyntaticVariables:(NSString *)filename {
+- (NSString *)filenameByExpandingMetasyntacticVariables:(NSString *)filename {
     filename = [filename stringByExpandingTildeInPath];
     NSDictionary *substitutions =
-        @{ @"%d": NSHomeDirectory(),
-           @"%u": NSUserName(),
-           @"%l": [[NSHost currentHost] name],
+        @{ @"%d": _homeDirectory,
+           @"%u": _userName,
+           @"%l": _hostName,
            @"%h": self.session.host,
            @"%r": self.session.username };
     for (NSString *metavar in substitutions) {
@@ -199,36 +330,84 @@ static NSError *SCPFileError(NSString *description) {
     return filename;
 }
 
-// This runs in a thread.
 - (void)performTransfer:(BOOL)isDownload {
+    [self performTransfer:isDownload agentAllowed:YES];
+}
+
+// Don't call this on the main thread!
+- (NSString *)keyboardInteractiveRequest:(NSString *)prompt {
+    __block NSString *value = nil;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_enter(group);
+    dispatch_async(dispatch_get_main_queue(), ^() {
+        [[FileTransferManager sharedInstance] transferrableFile:self
+                                              interactivePrompt:prompt
+                                                     completion:^(NSString *result) {
+                                                         value = [result copy];
+                                                         dispatch_group_leave(group);
+                                                     }];
+    });
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+
+    return value;
+}
+
+- (NSURL *)sessionURL {
+    assert(self.session);
+    NSURLComponents *components = [[NSURLComponents alloc] init];
+    components.host = self.session.host;
+    components.user = self.session.username;
+    components.port = self.session.port;
+    components.path = self.path.path;
+    components.scheme = @"ssh";
+    return components.URL;
+}
+
+// This runs in a thread.
+- (void)performTransfer:(BOOL)isDownload agentAllowed:(BOOL)agentAllowed {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        gNMSSHTraceCallback = ^(NSData *data) {
+            DLog(@"libssh2 trace: %@", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+        };
+    });
     NSString *baseName = [[self class] fileNameForPath:self.path.path];
+    DLog(@"performTransfer download=%@ agentAllowed=%@ path=%@ baseName=%@",
+         @(isDownload), @(agentAllowed), self.path, baseName);
     if (!baseName) {
         self.error = [NSString stringWithFormat:@"Invalid path: %@", self.path.path];
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        [self performOnMainThread:^{
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:SCPFileError(@"Invalid filename")];
-        });
+        }];
         return;
     }
     _okToAdd = NO;
+    int effectivePort;
     if (self.session) {
         self.session.delegate = self;
+        effectivePort = self.session.port.intValue;
     } else {
-        self.session = [[[NMSSHSession alloc] initWithHost:[self hostname]
-                                                   configs:[self configs]
-                                           withDefaultPort:[self port]
-                                           defaultUsername:self.path.username] autorelease];
+        DLog(@"Create seession to hostname=%@ configs=%@ port=%@ username=%@",
+             [self hostname], [SCPFile configs], @([self port]), self.path.username);
+        self.session = [[NMSSHSession alloc] initWithHost:[self hostname]
+                                                  configs:[SCPFile configs]
+                                          withDefaultPort:[self port]
+                                          defaultUsername:self.path.username];
+        effectivePort = self.session.port.intValue;
         self.session.delegate = self;
         [self.session connect];
         if (self.stopped) {
-            NSLog(@"Stop after connect");
-            dispatch_sync(dispatch_get_main_queue(), ^() {
+            XLog(@"Stop after connect");
+            [self performOnMainThread:^{
                 [[FileTransferManager sharedInstance] transferrableFileDidStopTransfer:self];
-            });
+            }];
             return;
         }
     }
+    NSURL *url = [self sessionURL];
     if (!self.session.isConnected) {
+        DLog(@"Not connected");
         NSError *theError = [self lastError];
         if (!theError) {
             // If connection fails, there is no rawSession in NMSSHSession, so it can't return an
@@ -239,31 +418,57 @@ static NSError *SCPFileError(NSString *description) {
         }
         self.error = [NSString stringWithFormat:@"Connection failed: %@",
                          theError.localizedDescription];
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        [self performOnMainThread:^{
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:theError];
-        });
+            iTermWarningSelection selection =
+                [iTermWarning showWarningWithTitle:[NSString stringWithFormat:@"Failed to connect to %@:%d. Double-check that the host name is correct.", self.hostname, effectivePort]
+                                           actions:@[ @"Ok", @"Help" ]
+                                     actionMapping:nil
+                                         accessory:nil
+                                        identifier:kSecureCopyConnectionFailedWarning
+                                       silenceable:kiTermWarningTypePermanentlySilenceable
+                                           heading:@"Connection Failed"
+                                       cancelLabel:@"Help"
+                                            window:nil];
+            if (selection == kiTermWarningSelection1) {
+                [[NSWorkspace sharedWorkspace] it_openURL:[NSURL URLWithString:@"https://iterm2.com/troubleshoot-hostname"]
+                                                   target:nil
+                                                    style:iTermOpenStyleTab
+                                                   window:nil];
+            }
+        }];
         return;
     }
-    
-    [self.session connectToAgent];
+
+    BOOL didConnectToAgent = NO;
+    if (agentAllowed && !self.hasPredecessor) {
+        DLog(@"Connect to agent");
+        self.session.authSock = [[iTermAuthSock sharedInstance] authSock];
+        [self.session connectToAgent];
+        // Check a private property to see if the connection to the agent was made.
+        if ([self.session respondsToSelector:@selector(agent)]) {
+            didConnectToAgent = [self.session agent] != nil;
+        }
+    }
 
     if (!self.session.isAuthorized) {
+        DLog(@"Authenticate");
         NSArray *authTypes = [self.session supportedAuthenticationMethods];
         if (!authTypes) {
             authTypes = @[ @"password" ];
         }
         for (NSString *authType in authTypes) {
             if (self.stopped) {
-                NSLog(@"Break out of auth loop because stopped");
+                XLog(@"Break out of auth loop because stopped");
+                break;
+            }
+            if (!self.session.session) {
+                XLog(@"Break out of auth loop because disconnected");
                 break;
             }
             if ([authType isEqualToString:@"password"]) {
-                __block NSString *password;
-                dispatch_sync(dispatch_get_main_queue(), ^() {
-                    password = [[FileTransferManager sharedInstance] transferrableFile:self
-                                                             keyboardInteractivePrompt:@"Password:"];
-                });
+                NSString *password = [self keyboardInteractiveRequest:@"password"];
                 if (self.stopped || !password) {
                     break;
                 }
@@ -273,12 +478,7 @@ static NSError *SCPFileError(NSString *description) {
                 }
             } else if ([authType isEqualToString:@"keyboard-interactive"]) {
                 [self.session authenticateByKeyboardInteractiveUsingBlock:^NSString *(NSString *request) {
-                    __block NSString *response;
-                    dispatch_sync(dispatch_get_main_queue(), ^() {
-                        response = [[FileTransferManager sharedInstance] transferrableFile:self
-                                                                 keyboardInteractivePrompt:request];
-                    });
-                    return response;
+                    return [self keyboardInteractiveRequest:request];
                 }];
                 if (self.stopped || self.session.isAuthorized) {
                     break;
@@ -287,39 +487,72 @@ static NSError *SCPFileError(NSString *description) {
                 if (self.stopped) {
                     break;
                 }
-                
+
                 NSMutableArray *keyPaths = [NSMutableArray array];
                 if (self.session.hostConfig.identityFiles.count) {
                     [keyPaths addObjectsFromArray:self.session.hostConfig.identityFiles];
                 } else {
                     [keyPaths addObjectsFromArray:@[ @"~/.ssh/id_rsa",
                                                      @"~/.ssh/id_dsa",
-                                                     @"~/.ssh/id_ecdsa" ]];
+                                                     @"~/.ssh/id_ecdsa",
+                                                     @"~/.ssh/id_ed25519" ]];
                 }
                 NSFileManager *fileManager = [NSFileManager defaultManager];
-                for (NSString *keyPath in keyPaths) {
-                    keyPath = [self filenameByExpandingMetasyntaticVariables:keyPath];
+                for (NSString *iteratedKeyPath in keyPaths) {
+                    NSString *keyPath = [self filenameByExpandingMetasyntacticVariables:iteratedKeyPath];
                     if (![fileManager fileExistsAtPath:keyPath]) {
-                        NSLog(@"No key file at %@", keyPath);
+                        XLog(@"No key file at %@", keyPath);
                         continue;
                     }
-                    __block NSString *password = nil;
-                    if ([self privateKeyIsEncrypted:keyPath]) {
-                        dispatch_sync(dispatch_get_main_queue(), ^() {
-                            NSString *prompt =
-                                [NSString stringWithFormat:@"Passphrase for private key “%@”:",
-                                    keyPath];
-                            password = [[FileTransferManager sharedInstance] transferrableFile:self
-                                                                     keyboardInteractivePrompt:prompt];
-                        });
-                    }
-                    NSLog(@"Attempting to authenticate with key %@", keyPath);
-                    [self.session authenticateByPublicKey:[keyPath stringByAppendingString:@".pub"]
-                                               privateKey:keyPath
-                                              andPassword:password];
-                
-                    if (self.session.isAuthorized) {
-                        break;
+                    const BOOL keyIsEncrypted = [self privateKeyIsEncrypted:keyPath];
+                    NSString *password = nil;
+                    BOOL firstAttempt = YES;
+
+                    // Loop to allow retry on wrong passphrase
+                    while (!self.stopped && self.session.session) {
+                        if (keyIsEncrypted) {
+                            NSString *prompt;
+                            if (firstAttempt) {
+                                prompt = [NSString stringWithFormat:@"passphrase for private key “%@”:",
+                                          keyPath];
+                            } else {
+                                prompt = [NSString stringWithFormat:@"correct passphrase for “%@”:",
+                                          keyPath];
+                            }
+                            password = [self keyboardInteractiveRequest:prompt];
+                            if (!password) {
+                                self.stopped = YES;
+                                break;
+                            }
+                            firstAttempt = NO;
+                        }
+
+                        XLog(@"Attempting to authenticate with key %@", keyPath);
+                        NSString *publicKeyPath = [keyPath stringByAppendingString:@".pub"];
+                        if (![[NSFileManager defaultManager] fileExistsAtPath:publicKeyPath]) {
+                            XLog(@"Warning: no public key at %@. Trying to authenticate with only a private key.", publicKeyPath);
+                            publicKeyPath = nil;
+                        }
+                        [self.session authenticateByPublicKey:publicKeyPath
+                                                   privateKey:keyPath
+                                                  andPassword:password];
+
+                        if (self.session.isAuthorized) {
+                            XLog(@"Authorized!");
+                            break;
+                        }
+
+                        if (!self.session.session) {
+                            XLog(@"Disconnected!");
+                            break;
+                        }
+
+                        // If key is not encrypted, don't retry - the key itself wasn't accepted
+                        if (!keyIsEncrypted) {
+                            break;
+                        }
+                        // For encrypted keys, loop back to ask for passphrase again
+                        XLog(@"Wrong passphrase for %@, prompting again", keyPath);
                     }
                 }
                 if (self.session.isAuthorized) {
@@ -329,15 +562,25 @@ static NSError *SCPFileError(NSString *description) {
         }
     }
     if (self.stopped) {
-        NSLog(@"Stop after auth");
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        XLog(@"Stop after auth");
+        [self performOnMainThread:^{
             [[FileTransferManager sharedInstance] transferrableFileDidStopTransfer:self];
-        });
+        }];
+        return;
+    }
+    if (!self.session.session && didConnectToAgent) {
+        DLog(@"Retry without agent");
+        // Try again without agent. I got into a state where using the agent prevented connections
+        // from going through.
+        [self.session disconnect];
+        self.session = nil;
+        [self performTransfer:isDownload agentAllowed:NO];
         return;
     }
     if (!self.session.isAuthorized) {
+        DLog(@"Still not authenticated.");
         __block NSError *error = [self lastError];
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        [self performOnMainThread:^{
             if (!error) {
                 error = [NSError errorWithDomain:@"com.googlecode.iterm2.SCPFile"
                                             code:0
@@ -346,11 +589,12 @@ static NSError *SCPFileError(NSString *description) {
             self.error = @"Authentication error.";
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:error];
-        });
+        }];
         return;
     }
-    
+
     if (_okToAdd) {
+        DLog(@"Add %@:%@ to known hosts", self.session.host, self.session.port);
         [self.session addKnownHostName:self.session.host
                                   port:[self.session.port intValue]
                                 toFile:nil
@@ -358,88 +602,125 @@ static NSError *SCPFileError(NSString *description) {
     }
 
     if (isDownload) {
-        NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory,
-                                                             NSUserDomainMask,
-                                                             YES);
-        NSString *downloadDirectory = nil;
+        DLog(@"Will download");
+        NSString *downloadDirectory = [[NSFileManager defaultManager] downloadsDirectory];
         NSString *tempfile = nil;
         NSString *tempFileName = [self tempFileName];
-        for (NSString *path in paths) {
-            if ([[NSFileManager defaultManager] isWritableFileAtPath:path]) {
-                tempfile = [path stringByAppendingPathComponent:tempFileName];
-                downloadDirectory = path;
-                break;
-            }
+        if (downloadDirectory) {
+            tempfile = [downloadDirectory stringByAppendingPathComponent:tempFileName];
         }
         if (!tempfile) {
-            self.error = [NSString stringWithFormat:@"Downloads folder not writable. Tried: %@",
-                          paths];
-            dispatch_sync(dispatch_get_main_queue(), ^() {
+            self.error = [NSString stringWithFormat:@"Downloads folder not writable. Tried %@",
+                          downloadDirectory];
+            [self performOnMainThread:^{
                 [[FileTransferManager sharedInstance] transferrableFile:self
                                          didFinishTransmissionWithError:SCPFileError(@"Downloads folder not writable")];
-            });
+            }];
             return;
         }
         self.destination = tempfile;
         self.status = kTransferrableFileStatusTransferring;
+        __block BOOL quarantined = NO;
+        __block BOOL quarantineError = NO;
         BOOL ok = [self.session.channel downloadFile:self.path.path
                                                   to:tempfile
                                             progress:^BOOL (NSUInteger bytes, NSUInteger fileSize) {
-                                                self.bytesTransferred = bytes;
-                                                self.fileSize = fileSize;
-                                                dispatch_sync(dispatch_get_main_queue(), ^() {
-                                                    if (!self.stopped) {
-                                                        [[FileTransferManager sharedInstance] transferrableFileProgressDidChange:self];
-                                                    }
-                                                });
-                                                if (self.stopped) {
-                                                    NSLog(@"Stopping mid-download");
-                                                }
-                                                return !self.stopped;
-                                            }];
-        __block NSError *error;
+            if (!quarantined) {
+                if (![self quarantine:tempfile sourceURL:url]) {
+                    quarantineError = YES;
+                    DLog(@"Quarantine error");
+                    return NO;
+                }
+                quarantined = YES;
+            }
+            self.bytesTransferred = bytes;
+            self.fileSize = fileSize;
+            [self performOnMainThread:^{
+                if (!self.stopped) {
+                    [[FileTransferManager sharedInstance] transferrableFileProgressDidChange:self];
+                }
+            }];
+            if (self.stopped) {
+                XLog(@"Stopping mid-download");
+            }
+            return !self.stopped;
+        }];
+        if (!quarantined && [[NSFileManager defaultManager] fileExistsAtPath:tempfile]) {
+            DLog(@"Apparently a zero byte file");
+            // Zero-byte file, presumably.
+            if (![self quarantine:tempfile sourceURL:url]) {
+                quarantineError = YES;
+                DLog(@"Quarantine failed");
+                ok = NO;
+            } else {
+                quarantined = YES;
+            }
+        }
+        __block NSError *error = nil;
         __block NSString *finalDestination = nil;
         if (ok) {
+            DLog(@"Download OK");
             error = nil;
             // We determine the filename and perform the move in the main thread to avoid two
             // threads trying to determine the final destination at the same time.
-            dispatch_sync(dispatch_get_main_queue(), ^() {
-                finalDestination = [[self finalDestinationForPath:baseName
-                                             destinationDirectory:downloadDirectory] retain];
-                [[NSFileManager defaultManager] moveItemAtPath:tempfile
-                                                        toPath:finalDestination
-                                                         error:&error];
-            });
+            [self performOnMainThread:^{
+                finalDestination = [self finalDestinationForPath:baseName
+                                            destinationDirectory:downloadDirectory
+                                                          prompt:YES];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:finalDestination]) {
+                    [[NSFileManager defaultManager] replaceItemAtURL:[NSURL fileURLWithPath:finalDestination]
+                                                       withItemAtURL:[NSURL fileURLWithPath:tempfile]
+                                                      backupItemName:nil
+                                                             options:0
+                                                    resultingItemURL:nil
+                                                               error:&error];
+                } else {
+                    [[NSFileManager defaultManager] moveItemAtPath:tempfile
+                                                            toPath:finalDestination
+                                                             error:&error];
+                }
+            }];
             if (error) {
-                self.error = [NSString stringWithFormat:@"Couldn't move %@ to %@",
-                              tempfile, finalDestination];
+                self.error = error.localizedDescription;
+                DLog(@"%@", error);
             }
             [[NSFileManager defaultManager] removeItemAtPath:tempfile error:NULL];
-            self.destination = [finalDestination autorelease];
+            self.destination = finalDestination;
         } else {
-            [[NSFileManager defaultManager] removeItemAtPath:tempfile error:NULL];
+            DLog(@"Download failed.");
+            const BOOL ok = [[NSFileManager defaultManager] removeItemAtPath:tempfile error:&error];
+            DLog(@"Remove %@: %@", tempfile, error);
+            if (quarantineError && (!ok || error)) {
+                [self performOnMainThread:^{
+                    [self failedToRemoveUnquarantinedFileAt:tempfile];
+                }];
+            }
             if (self.stopped) {
-                dispatch_sync(dispatch_get_main_queue(), ^() {
+                [self performOnMainThread:^{
                     [[FileTransferManager sharedInstance] transferrableFileDidStopTransfer:self];
-                });
+                }];
                 return;
             } else {
-                NSString *errorDescription = [[self lastError] localizedDescription];
-                if (errorDescription.length) {
-                    self.error = errorDescription;
+                if (quarantineError) {
+                    self.error = @"Quarantine Error";
                 } else {
-                    self.error = @"Download failed";
+                    NSString *errorDescription = [[self lastError] localizedDescription];
+                    if (errorDescription.length) {
+                        self.error = errorDescription;
+                    } else {
+                        self.error = @"Download failed";
+                    }
                 }
                 error = SCPFileError(@"Download failed");
             }
         }
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        [self performOnMainThread:^{
             if (!error) {
                 self.localPath = finalDestination;
             }
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:error];
-        });
+        }];
         if (!error && self.successor) {
             SCPFile *scpSuccessor = (SCPFile *)self.successor;
             scpSuccessor.session = self.session;
@@ -449,26 +730,30 @@ static NSError *SCPFileError(NSString *description) {
             [scpSuccessor performTransferWrapper:isDownload];
         }
     } else {
+        DLog(@"Will upload");
         self.status = kTransferrableFileStatusTransferring;
+        DLog(@"Upload “%@” to “%@”", [self localPath], self.path.path);
         BOOL ok = [self.session.channel uploadFile:[self localPath]
                                                 to:self.path.path
                                           progress:^BOOL (NSUInteger bytes) {
-                                              self.bytesTransferred = bytes;
-                                              dispatch_sync(dispatch_get_main_queue(), ^() {
+            self.bytesTransferred = bytes;
+            [self performOnMainThread:^{
                                                   if (!self.stopped) {
                                                       [[FileTransferManager sharedInstance] transferrableFileProgressDidChange:self];
                                                   }
-                                              });
-                                              return !self.stopped;
-                                          }];
+            }];
+            return !self.stopped;
+        }];
         NSError *error;
         if (ok) {
+            DLog(@"Upload OK");
             error = nil;
         } else {
+            DLog(@"Upload failed: %@", error);
             if (self.stopped) {
-                dispatch_sync(dispatch_get_main_queue(), ^() {
+                [self performOnMainThread:^{
                     [[FileTransferManager sharedInstance] transferrableFileDidStopTransfer:self];
-                });
+                }];
                 return;
             } else {
                 NSString *errorDescription = [[self lastError] localizedDescription];
@@ -480,10 +765,10 @@ static NSError *SCPFileError(NSString *description) {
                 error = SCPFileError(@"Upload failed");
             }
         }
-        dispatch_sync(dispatch_get_main_queue(), ^() {
+        [self performOnMainThread:^{
             [[FileTransferManager sharedInstance] transferrableFile:self
                                      didFinishTransmissionWithError:error];
-        });
+        }];
         if (!error && self.successor) {
             SCPFile *scpSuccessor = (SCPFile *)self.successor;
             scpSuccessor.session = self.session;
@@ -495,10 +780,50 @@ static NSError *SCPFileError(NSString *description) {
     }
 }
 
+- (void)performOnMainThread:(void (^ NS_NOESCAPE)(void))block {
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_enter(group);
+    dispatch_async(dispatch_get_main_queue(), ^() {
+        [NSTimer scheduledTimerWithTimeInterval:0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+            block();
+            dispatch_group_leave(group);
+        }];
+    });
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+}
+
 - (NSString *)tempFileName {
     NSString *result = [NSString stringWithFormat:@".iTerm2.%@", [NSString uuid]];
 
     return result;
+}
+
+static NSString *const SCPFileKnownHostsUserDefaultsKey = @"NoSyncKnownHosts";
+
+- (NSString *)userHostPort {
+    return [NSString stringWithFormat:@"%@@%@:%@", self.path.username, self.hostname, @(self.port)];
+}
+
+- (BOOL)hostnameIsKnown {
+    return [[[iTermUserDefaults userDefaults] objectForKey:SCPFileKnownHostsUserDefaultsKey] containsObject:self.userHostPort];
+}
+
+- (BOOL)shouldConnectToNewHostname {
+    const iTermWarningSelection selection =
+    [iTermWarning showWarningWithTitle:[NSString stringWithFormat:@"Connect to %@?", self.userHostPort]
+                               actions:@[ @"OK", @"Cancel" ]
+                             accessory:nil
+                            identifier:[@"NoSyncConnectTo_" stringByAppendingString:self.userHostPort]
+                           silenceable:kiTermWarningTypePermanentlySilenceable
+                               heading:@"Connect to New Host?"
+                                window:nil];
+    return selection == kiTermWarningSelection0;
+}
+
+- (void)addKnownHost {
+    NSArray<NSString *> *hosts = [[iTermUserDefaults userDefaults] objectForKey:SCPFileKnownHostsUserDefaultsKey] ?: @[];
+    hosts = [hosts arrayByAddingObject:self.userHostPort];
+    [[iTermUserDefaults userDefaults] setObject:hosts forKey:SCPFileKnownHostsUserDefaultsKey];
 }
 
 - (void)download {
@@ -508,20 +833,85 @@ static NSError *SCPFileError(NSString *description) {
     [[FileTransferManager sharedInstance] transferrableFileDidStartTransfer:self];
 
     if (!self.hasPredecessor) {
+        if (![self hostnameIsKnown]) {
+            if (![self shouldConnectToNewHostname]) {
+                self.error = @"Canceled by user";
+                [[FileTransferManager sharedInstance] transferrableFile:self
+                                         didFinishTransmissionWithError:SCPFileError(@"Canceled by user")];
+                return;
+            }
+            [self addKnownHost];
+        }
         dispatch_async(_queue, ^() {
             [self performTransferWrapper:YES];
         });
     }
 }
 
+// If localPath is a directory, creates a tgz archive and updates localPath and path.path.
+// Returns the file attributes on success, or nil on failure (after reporting the error).
+- (NSDictionary *)archiveDirectoryIfNeededWithAttributes:(NSDictionary *)attrs {
+    NSString *fileType = attrs[NSFileType];
+    if (![fileType isEqualToString:NSFileTypeDirectory]) {
+        return attrs;
+    }
+
+    DLog(@"Uploading directory as tgz: %@", self.localPath);
+
+    NSError *error = nil;
+    _tempArchivePath = [NSData temporaryTGZArchiveOfDirectory:self.localPath error:&error];
+    if (!_tempArchivePath) {
+        self.error = error.localizedDescription;
+        [[FileTransferManager sharedInstance] transferrableFile:self
+                                 didFinishTransmissionWithError:error];
+        return nil;
+    }
+
+    // Update paths to use the archive
+    self.localPath = _tempArchivePath;
+    self.path.path = [self.path.path stringByAppendingString:@".tgz"];
+
+    // Return updated attrs for the new file
+    return [[NSFileManager defaultManager] attributesOfItemAtPath:self.localPath error:nil];
+}
+
 - (void)upload {
     _downloading = NO;
     self.status = kTransferrableFileStatusStarting;
-    self.fileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:self.localPath error:nil] fileSize];
+
+    // Verify the file exists and is readable before starting the upload
+    NSError *attributesError = nil;
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:self.localPath error:&attributesError];
+    if (attributesError) {
+        DLog(@"Failed to get attributes for %@: %@", self.localPath, attributesError);
+        self.error = [NSString stringWithFormat:@"Cannot read file: %@", attributesError.localizedDescription];
+        [[FileTransferManager sharedInstance] transferrableFile:self
+                                 didFinishTransmissionWithError:attributesError];
+        return;
+    }
+
+    // If it's a directory, create a tgz archive
+    attrs = [self archiveDirectoryIfNeededWithAttributes:attrs];
+    if (!attrs) {
+        return;
+    }
+
+    self.fileSize = [attrs fileSize];
+    DLog(@"upload: localPath=%@ fileSize=%@", self.localPath, @(self.fileSize));
+
     [[[FileTransferManager sharedInstance] files] addObject:self];
     [[FileTransferManager sharedInstance] transferrableFileDidStartTransfer:self];
-    
+
     if (!self.hasPredecessor) {
+        if (![self hostnameIsKnown]) {
+            if (![self shouldConnectToNewHostname]) {
+                self.error = @"Canceled by user";
+                [[FileTransferManager sharedInstance] transferrableFile:self
+                                         didFinishTransmissionWithError:SCPFileError(@"Canceled by user")];
+                return;
+            }
+            [self addKnownHost];
+        }
         dispatch_async(_queue, ^() {
             [self performTransferWrapper:NO];
         });
@@ -539,53 +929,68 @@ static NSError *SCPFileError(NSString *description) {
 - (BOOL)session:(NMSSHSession *)session shouldConnectToHostWithFingerprint:(NSString *)fingerprint {
     // It's not necessary to initialize result but it makes the analyzer shut up.
     __block BOOL result = NO;
-    dispatch_sync(dispatch_get_main_queue(), ^(void) {
+    const NMSSHKnownHostStatus status = [self.session knownHostStatusInFiles:nil];
+    NSString *host = session.host;
+    NSString *hashName = @"";
+    switch (session.fingerprintHash) {
+        case NMSSHSessionHashMD5:
+            hashName = @"MD5";
+            break;
+        case NMSSHSessionHashSHA1:
+            hashName = @"SHA1";
+            break;
+    }
+    [self performOnMainThread:^{
         _okToAdd = NO;
-        NSString *message;
-        switch ([self.session knownHostStatusInFiles:nil]) {
+        NSString *message = nil;
+        NSString *title = @"Notice";  // The default value should never be used.
+        switch (status) {
             case NMSSHKnownHostStatusFailure:
+                title = [NSString stringWithFormat:@"Problem connecting to %@", host];
                 message = [NSString stringWithFormat:@"Could not read the known_hosts file.\n"
-                                                     @"As a result, the autenticity of host '%@' can't be established."
-                                                     @"DSA key fingerprint is %@. Connect anyway?",
-                           session.host, fingerprint];
+                                                     @"As a result, the authenticity of host '%@' can't be established."
+                                                     @"%@ key fingerprint is %@. Connect anyway?",
+                           host, hashName, fingerprint];
                 break;
-                
+
             case NMSSHKnownHostStatusMatch:
                 result = YES;
                 message = nil;
                 break;
 
             case NMSSHKnownHostStatusMismatch:
+                title = @"Warning!";
                 message =
-                    [NSString stringWithFormat:@"REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
-                                               @"The DSA key fingerprint of host '%@' has changed. It is %@.\n"
+                    [NSString stringWithFormat:@"REMOTE HOST IDENTIFICATION HAS CHANGED!\n\n"
+                                               @"The %@ key fingerprint of host '%@' has changed. It is %@.\n\n"
                                                @"Someone could be eavesdropping on you right now (man-in-the-middle attack)!\n"
                                                @"It is also possible that a host key has just been changed.\nConnect anyway?",
-                     session.host, fingerprint];
+                     host, hashName, fingerprint];
                 break;
-                
+
             case NMSSHKnownHostStatusNotFound:
+                title = [NSString stringWithFormat:@"First time connecting to %@", host];
                 message =
-                    [NSString stringWithFormat:@"The authenticity of host '%@' can't be established.\n"
-                                               @"DSA key fingerprint is %@.\nConnect anyay?",
-                        session.host, fingerprint];
+                    [NSString stringWithFormat:@"The authenticity of host '%@' can't be established.\n\n"
+                                               @"%@ key fingerprint is %@.\n\nConnect anyway?",
+                     host, hashName, fingerprint];
                 _okToAdd = YES;
                 break;
         }
         if (message) {
             result = [[FileTransferManager sharedInstance] transferrableFile:self
+                                                                       title:title
                                                               confirmMessage:message];
         }
-    });
+    }];
     return result;
 }
 
 - (NSString *)session:(NMSSHSession *)session keyboardInteractiveRequest:(NSString *)request {
     __block NSString *string;
-    dispatch_sync(dispatch_get_main_queue(), ^() {
-        string = [[FileTransferManager sharedInstance] transferrableFile:self
-                                               keyboardInteractivePrompt:request];
-    });
+    [self performOnMainThread:^{
+        string = [self keyboardInteractiveRequest:request];
+    }];
     return string;
 }
 

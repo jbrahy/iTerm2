@@ -9,46 +9,36 @@
 #import <Cocoa/Cocoa.h>
 #import "FutureMethods.h"
 
-@protocol TmuxSessionsTableProtocol
+@class TmuxSessionsTable;
+@class iTermTmuxSessionObject;
 
-- (NSArray *)sessions;
-- (void)renameSessionWithName:(NSString *)oldName toName:(NSString *)newName;
-- (void)removeSessionWithName:(NSString *)sessionName;
+@protocol TmuxSessionsTableProtocol <NSObject>
+
+- (NSArray<iTermTmuxSessionObject *> *)sessionsTableObjects:(TmuxSessionsTable *)sender;
+- (void)renameSessionWithNumber:(int)sessionNumber
+                         toName:(NSString *)newName;
+- (void)removeSessionWithNumber:(int)sessionNumber;
 - (void)addSessionWithName:(NSString *)sessionName;
-- (void)attachToSessionWithName:(NSString *)sessionName;
-- (NSString *)nameOfAttachedSession;
-- (void)selectedSessionChangedTo:(NSString *)newName;
+- (void)attachToSessionWithNumber:(int)sessionNumber;
+- (NSNumber *)numberOfAttachedSession;
+- (void)selectedSessionDidChange;
 - (void)linkWindowId:(int)windowId
-           inSession:(NSString *)sessionName
-           toSession:(NSString *)targetSession;
+     inSessionNumber:(int)sourceSessionNumber
+     toSessionNumber:(int)targetSessionNumber;
+- (void)moveWindowId:(int)windowId
+     inSessionNumber:(int)sessionNumber
+     toSessionNumber:(int)targetSessionNumber;
 - (void)detach;
 
 @end
 
-@interface TmuxSessionsTable : NSObject <NSTableViewDelegate, NSTableViewDataSource> {
-    NSMutableArray *model_;
-    BOOL canAttachToSelectedSession_;
-    NSObject<TmuxSessionsTableProtocol> *delegate_;  // weak
+@interface TmuxSessionsTable : NSObject <NSTableViewDelegate, NSTableViewDataSource>
 
-    IBOutlet NSTableColumn *checkColumn_;
-    IBOutlet NSTableColumn *nameColumn_;
-    IBOutlet NSTableView *tableView_;
-    IBOutlet NSButton *attachButton_;
-    IBOutlet NSButton *detachButton_;
-    IBOutlet NSButton *removeButton_;
-}
+@property(nonatomic, assign) id<TmuxSessionsTableProtocol> delegate;
+@property(nonatomic, readonly) NSNumber *selectedSessionNumber;
 
-@property (nonatomic, assign) NSObject<TmuxSessionsTableProtocol> *delegate;
-
-- (void)setSessions:(NSArray *)names;
-- (NSString *)selectedSessionName;
-- (void)selectSessionWithName:(NSString *)name;
-
-#pragma mark Interface Builder actions
-
-- (IBAction)addSession:(id)sender;
-- (IBAction)removeSession:(id)sender;
-- (IBAction)attach:(id)sender;
-- (IBAction)detach:(id)sender;
+- (void)setSessionObjects:(NSArray<iTermTmuxSessionObject *> *)names;
+- (void)selectSessionNumber:(int)number;
+- (void)endEditing;
 
 @end

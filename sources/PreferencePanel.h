@@ -33,18 +33,19 @@
 #import "TriggerController.h"
 #import "WindowArrangements.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 extern NSString *const kRefreshTerminalNotification;
 extern NSString *const kUpdateLabelsNotification;
-extern NSString *const kKeyBindingsChangedNotification;
 extern NSString *const kPreferencePanelDidUpdateProfileFields;
 extern NSString *const kSessionProfileDidChange;  // Posted by a session when it changes to update the Get Info window.
+extern NSString *const kPreferencePanelDidLoadNotification;
+extern NSString *const kPreferencePanelWillCloseNotification;
 
 // All profiles should be reloaded.
 extern NSString *const kReloadAllProfiles;
 
-#define OPT_NORMAL 0
-#define OPT_META   1
-#define OPT_ESC    2
+CGFloat iTermPreferencePanelGetWindowMinimumWidth(BOOL session);
 
 // Constants for KEY_PROMPT_CLOSE
 // Never prompt on close
@@ -56,10 +57,23 @@ extern NSString *const kReloadAllProfiles;
 
 @class iTermController;
 @class iTermSemanticHistoryPrefsController;
+@class iTermShortcutInputView;
+@protocol iTermSessionScope;
+@class iTermSetting;
+@class PreferenceInfo;
 @class SmartSelectionController;
 @class TriggerController;
 
 void LoadPrefsFromCustomFolder(void);
+
+@protocol iTermPrefsPanelDelegate<NSObject>
+- (void)prefsPanelDidChangeFrameTo:(NSRect)newFrame;
+- (void)responderWillBecomeFirstResponder:(NSResponder *)responder;
+@end
+
+@interface iTermPrefsPanel : NSPanel
+@property (nonatomic, weak) id<iTermPrefsPanelDelegate> prefsPanelDelegate;
+@end
 
 @interface PreferencePanel : NSWindowController <
     ProfileListViewDelegate,
@@ -67,34 +81,53 @@ void LoadPrefsFromCustomFolder(void);
     NSWindowDelegate,
     NSMenuDelegate>
 
-@property(nonatomic, readonly) NSString *currentProfileGuid;
+@property(nonatomic, readonly, nullable) NSString *currentProfileGuid;
+
+// Returns the window if the pref panel is loaded or nil if not.
+@property(nonatomic, readonly, nullable) NSWindow *windowIfLoaded;
 
 + (instancetype)sharedInstance;
 + (instancetype)sessionsInstance;
 
-- (void)openToProfileWithGuid:(NSString*)guid selectGeneralTab:(BOOL)selectGeneralTab;
+- (instancetype)initWithProfileModel:(ProfileModel *)model
+              editCurrentSessionMode:(BOOL)editCurrentSessionMode;
 
-- (IBAction)showGlobalTabView:(id)sender;
-- (IBAction)showAppearanceTabView:(id)sender;
-- (IBAction)showBookmarksTabView:(id)sender;
-- (IBAction)showKeyboardTabView:(id)sender;
-- (IBAction)showArrangementsTabView:(id)sender;
-- (IBAction)showMouseTabView:(id)sender;
+- (void)openToProfileWithGuid:(NSString *)guid
+             selectGeneralTab:(BOOL)selectGeneralTab
+                         tmux:(BOOL)tmux
+                        scope:(iTermVariableScope<iTermSessionScope> * _Nullable)scope
+                   showWindow:(BOOL)show;
 
-- (void)underlyingBookmarkDidChange;
+- (IBAction)showGlobalTabView:(id _Nullable)sender;
+- (IBAction)showAppearanceTabView:(id _Nullable)sender;
+- (IBAction)showProfilesTabView:(id _Nullable)sender;
+- (IBAction)showKeyboardTabView:(id _Nullable)sender;
+- (IBAction)showArrangementsTabView:(id _Nullable)sender;
+- (IBAction)showMouseTabView:(id _Nullable)sender;
+
+- (void)underlyingProfileDidChange;
 
 - (WindowArrangements *)arrangements;
 - (void)run;
-// Returns true if ANY profile has growl enabled (preserves interface from back
-// when there was a global growl setting as well as a per-profile setting).
-- (NSTextField*)hotkeyField;
+- (iTermShortcutInputView *)hotkeyField;
 
-- (void)changeFont:(id)fontManager;
 - (void)selectProfilesTab;
 
-- (BOOL)importColorPresetFromFile:(NSString*)filename;
+// Go to the profiles tab, go to its Keys sub-tab, and open the Hotkey window panel.
+- (void)configureHotkeyForProfile:(Profile *)profile;
+- (void)openToProfileWithGuid:(NSString *)guid
+andEditComponentWithIdentifier:(NSString *)identifier
+                         tmux:(BOOL)tmux
+                        scope:(iTermVariableScope<iTermSessionScope> *)scope;
 
-// Safely remove a profile and references to it and update display.
-- (void)removeProfileWithGuid:(NSString *)guid;
+- (void)openToProfileWithGuid:(NSString *)guid
+                          key:(NSString *)key;
+
+- (void)openToPreferenceWithKey:(NSString *)key;
+- (NSArray<iTermSetting *> *)allSettings;
+- (BOOL)toggleSetting:(NSString * _Nullable)key;
+- (BOOL)toggleProfileSetting:(NSString * _Nullable)key;
 
 @end
+
+NS_ASSUME_NONNULL_END

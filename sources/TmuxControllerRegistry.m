@@ -7,10 +7,14 @@
 //
 
 #import "TmuxControllerRegistry.h"
+#import "TmuxController.h"
 
 NSString *const kTmuxControllerRegistryDidChange = @"kTmuxControllerRegistryDidChange";
 
-@implementation TmuxControllerRegistry
+@implementation TmuxControllerRegistry {
+    // Key gives a client name.
+    NSMutableDictionary<NSString *, TmuxController *> *controllers_;
+}
 
 + (TmuxControllerRegistry *)sharedInstance
 {
@@ -21,13 +25,16 @@ NSString *const kTmuxControllerRegistryDidChange = @"kTmuxControllerRegistryDidC
     return instance;
 }
 
-- (id)init
-{
+- (instancetype)init {
     self = [super init];
     if (self) {
         controllers_ = [[NSMutableDictionary alloc] init];
     }
     return self;
+}
+
+- (NSString *)description {
+    return [controllers_ description];
 }
 
 - (TmuxController *)controllerForClient:(NSString *)client
@@ -56,12 +63,22 @@ NSString *const kTmuxControllerRegistryDidChange = @"kTmuxControllerRegistryDidC
                                                         object:client];
 }
 
-- (int)numberOfClients {
+- (NSInteger)numberOfClients {
     return controllers_.count;
 }
 
 - (NSArray *)clientNames {
     return [[controllers_ allKeys] sortedArrayUsingSelector:@selector(compare:)];
+}
+
+- (TmuxController *)tmuxControllerWithSessionGUID:(NSString *)sessionGUID {
+    for (NSString *key in controllers_) {
+        TmuxController *controller = controllers_[key];
+        if ([controller.sessionGuid isEqualToString:sessionGUID]) {
+            return controller;
+        }
+    }
+    return nil;
 }
 
 @end

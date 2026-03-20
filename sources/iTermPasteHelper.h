@@ -11,12 +11,18 @@
 
 extern const int kNumberOfSpacesPerTabCancel;
 extern const int kNumberOfSpacesPerTabNoConversion;
+extern const int kNumberOfSpacesPerTabOpenAdvancedPaste;
+extern const NSInteger iTermQuickPasteBytesPerCallDefaultValue;
+
+@class iTermStatusBarViewController;
+@class iTermVariableScope;
+@class PasteContext;
 
 @protocol iTermPasteHelperDelegate <NSObject>
 
-- (void)pasteHelperWriteData:(NSData *)data;
+- (void)pasteHelperWriteString:(NSString *)string;
 
-// Handle a key-down event that was previously enequeued.
+// Handle a key-down event that was previously enqueued.
 - (void)pasteHelperKeyDown:(NSEvent *)event;
 
 // Indicates if pastes should be bracketed with a special escape sequence.
@@ -27,18 +33,34 @@ extern const int kNumberOfSpacesPerTabNoConversion;
 
 // View in which to show the paste indicator.
 - (NSView *)pasteHelperViewForIndicator;
+- (iTermStatusBarViewController *)pasteHelperStatusBarViewController;
 
+// Are you currently at a shell prompt? Implies shell integration.
 - (BOOL)pasteHelperIsAtShellPrompt;
+
+// Returns YES if we know we're NOT at a shell prompt. If uncertain, returns NO.
+- (BOOL)pasteHelperShouldWaitForPrompt;
 
 // Is shell integration installed?
 - (BOOL)pasteHelperCanWaitForPrompt;
+
+// Paste view did appear/disappear
+- (void)pasteHelperPasteViewVisibilityDidChange;
+
+- (iTermVariableScope *)pasteHelperScope;
 
 @end
 
 @interface iTermPasteHelper : NSObject
 
-@property(nonatomic, assign) id<iTermPasteHelperDelegate> delegate;
+@property(nonatomic, weak) id<iTermPasteHelperDelegate> delegate;
 @property(nonatomic, readonly) BOOL isPasting;
+@property(nonatomic, readonly) BOOL dropDownPasteViewIsVisible;
+@property(nonatomic, readonly) BOOL isWaitingForPrompt;
+@property(nonatomic, readonly) PasteContext *pasteContext;
+
++ (BOOL)promptToConvertTabsToSpacesWhenPasting;
++ (void)togglePromptToConvertTabsToSpacesWhenPasting;
 
 + (NSMutableCharacterSet *)unsafeControlCodeSet;
 
@@ -50,9 +72,19 @@ extern const int kNumberOfSpacesPerTabNoConversion;
 - (void)pasteString:(NSString *)theString
              slowly:(BOOL)slowly
    escapeShellChars:(BOOL)escapeShellChars
-           commands:(BOOL)commands
+           isUpload:(BOOL)isUpload
+    allowBracketing:(BOOL)allowBracketing
        tabTransform:(iTermTabTransformTags)tabTransform
        spacesPerTab:(int)spacesPerTab;
+
+- (void)pasteString:(NSString *)theString
+             slowly:(BOOL)slowly
+   escapeShellChars:(BOOL)escapeShellChars
+           isUpload:(BOOL)isUpload
+    allowBracketing:(BOOL)allowBracketing
+       tabTransform:(iTermTabTransformTags)tabTransform
+       spacesPerTab:(int)spacesPerTab
+           progress:(void (^)(NSInteger))progress;
 
 // The string comes from the paste special view controller.
 - (void)pasteString:(NSString *)theString stringConfig:(NSString *)jsonConfig;
@@ -72,6 +104,9 @@ extern const int kNumberOfSpacesPerTabNoConversion;
 // allows one more line to be pasted.
 - (void)unblock;
 
+- (void)showAdvancedPasteWithFlags:(PTYSessionPasteFlags)flags;
+- (void)temporaryRightStatusBarComponentDidBecomeAvailable;
+
 #pragma mark - Testing
 
 // This method can be overridden for testing.
@@ -80,5 +115,15 @@ extern const int kNumberOfSpacesPerTabNoConversion;
                                    selector:(SEL)aSelector
                                    userInfo:(id)userInfo
                                     repeats:(BOOL)yesOrNo;
+
+- (PasteEvent *)pasteEventWithString:(NSString *)theString
+                              slowly:(BOOL)slowly
+                    escapeShellChars:(BOOL)escapeShellChars
+                            isUpload:(BOOL)isUpload
+                     allowBracketing:(BOOL)allowBracketing  // if true respect delegate's wishes.
+                        tabTransform:(iTermTabTransformTags)tabTransform
+                        spacesPerTab:(int)spacesPerTab
+                            progress:(void (^)(NSInteger))progress;
+- (void)tryToPasteEvent:(PasteEvent *)pasteEvent;
 
 @end

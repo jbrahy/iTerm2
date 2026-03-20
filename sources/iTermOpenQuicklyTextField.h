@@ -7,6 +7,9 @@
 // A text field that passes arrow keys to its arrowHandler.
 @interface iTermOpenQuicklyTextField : NSTextField
 
-@property(nonatomic, assign) IBOutlet id<iTermOpenQuicklyTextFieldDelegate> arrowHandler;
+@property(nonatomic, weak) IBOutlet id<iTermOpenQuicklyTextFieldDelegate> arrowHandler;
 
+@end
+
+@interface iTermOpenQuicklyTextView: NSTextView
 @end

@@ -8,6 +8,7 @@
 
 #import "iTermMouseCursor.h"
 #import "iTermAdvancedSettingsModel.h"
+#import "NSImage+iTerm.h"
 
 @interface NSCursor ()
 // This is an Apple private method that, when overridden, allows you to use
@@ -80,16 +81,44 @@ enum {
     }
 }
 
-- (id)initWithType:(iTermMouseCursorType)cursorType {
+- (NSImage *)catalinaIBeamWithCircleImage {
+    NSImage *ibeam = [[NSCursor IBeamCursor] image];
+    NSImage *overlay = [NSImage it_imageNamed:@"MouseReportingCursorOverlay"
+                                     forClass:self.class];
+    const NSSize size = ibeam.size;
+    return [NSImage imageOfSize:size drawBlock:^{
+        const NSRect rect = NSMakeRect(0, 0, size.width, size.height);
+        [ibeam drawInRect:rect];
+        NSRect dest = NSMakeRect((ibeam.size.width - overlay.size.width) / 2.0,
+                                 (ibeam.size.height - overlay.size.height) / 2.0,
+                                 overlay.size.width,
+                                 overlay.size.height);
+        [overlay drawInRect:dest fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+    }];
+}
+
+- (NSImage *)ibeamWithCircleImage {
+    if ([iTermAdvancedSettingsModel useSystemCursorWhenPossible]) {
+        NSImage *image = [self catalinaIBeamWithCircleImage];
+        if (image) {
+            return image;
+        }
+    }
+    return [NSImage it_imageNamed:@"IBarCursorXMR" forClass:self.class];
+}
+
+- (instancetype)initWithType:(iTermMouseCursorType)cursorType {
     switch (cursorType) {
-        case iTermMouseCursorTypeIBeamWithCircle:
-            self = [super initWithImage:[NSImage imageNamed:@"IBarCursorXMR"]
-                                hotSpot:NSMakePoint(4, 8)];
+        case iTermMouseCursorTypeIBeamWithCircle: {
+            NSImage *image = [self ibeamWithCircleImage];
+            const NSSize size = image.size;
+            self = [super initWithImage:image
+                                hotSpot:NSMakePoint(size.width / 2.0, size.height / 2.0)];
             if (self) {
                 _hasImage = YES;
             }
             break;
-            
+        }
         case iTermMouseCursorTypeIBeam:
             if ([iTermAdvancedSettingsModel useSystemCursorWhenPossible]) {
                 self = [super init];
@@ -97,21 +126,23 @@ enum {
                     _type = kIBeamCursor;
                 }
             } else {
-                self = [super initWithImage:[NSImage imageNamed:@"IBarCursor"]
-                                    hotSpot:NSMakePoint(4, 8)];
+                NSImage *image = [NSImage it_imageNamed:@"IBarCursor" forClass:self.class];
+                const NSSize size = image.size;
+                self = [super initWithImage:image
+                                    hotSpot:NSMakePoint(size.width / 2.0, size.height / 2.0)];
                 if (self) {
                     _hasImage = YES;
                 }
             }
             break;
-            
+
         case iTermMouseCursorTypeNorthwestSoutheastArrow:
             self = [super init];
             if (self) {
                 _type = kResizeNorthwestSoutheastCursor;
             }
             break;
-            
+
         case iTermMouseCursorTypeArrow:
             self = [super init];
             if (self) {
@@ -132,5 +163,5 @@ enum {
         return _type;
     }
 }
-    
+
 @end

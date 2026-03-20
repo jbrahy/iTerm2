@@ -8,20 +8,21 @@
 
 #import <Foundation/Foundation.h>
 
+@class PasteEvent;
+
 @interface PasteContext : NSObject
 
-- (id)initWithBytesPerCallPrefKey:(NSString*)bytesPerCallKey
-                     defaultValue:(int)bytesPerCallDefault
-         delayBetweenCallsPrefKey:(NSString*)delayBetweenCallsKey
-                     defaultValue:(float)delayBetweenCallsDefault;
-
+@property(nonatomic, assign) int bytesPerCall;
+@property(nonatomic, assign) float delayBetweenCalls;
 @property(nonatomic, assign) BOOL blockAtNewline;
 @property(nonatomic, assign) BOOL isBlocked;
+@property(nonatomic, assign) BOOL isUpload;
+@property(nonatomic, copy) void (^progress)(NSInteger);
+@property(nonatomic, assign) NSInteger bytesWritten;
+@property(nonatomic, readonly) PasteEvent *pasteEvent;
 
-- (int)bytesPerCall;
-- (void)setBytesPerCall:(int)newBytesPerCall;
-- (float)delayBetweenCalls;
-- (void)setDelayBetweenCalls:(float)newDelayBetweenCalls;
+- (instancetype)initWithPasteEvent:(PasteEvent *)pasteEvent;
+
 - (void)updateValues;
 
 @end

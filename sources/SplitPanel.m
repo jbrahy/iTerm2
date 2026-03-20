@@ -9,6 +9,9 @@
 #import "SplitPanel.h"
 #import "ProfileListView.h"
 
+@interface SplitPanel ()<ProfileListViewDelegate>
+@end
+
 @implementation SplitPanel
 
 @synthesize parent = parent_;
@@ -27,26 +30,23 @@
         } else {
             [splitPanel.label setStringValue:@"Split current pane horizontally with profile:"];
         }
-        [NSApp beginSheet:[splitPanel window]
-            modalForWindow:[parent window]
-            modalDelegate:splitPanel
-            didEndSelector:@selector(sheetDidEnd:returnCode:contextInfo:)
-            contextInfo:nil];
-        
+        [parent.window beginSheet:splitPanel.window completionHandler:^(NSModalResponse returnCode) {
+            [NSApp stopModal];
+        }];
+
         NSWindow *panel = [splitPanel window];
         [NSApp runModalForWindow:panel];
-        [NSApp endSheet:panel];
+        [parent.window endSheet:splitPanel.window];
         [panel orderOut:nil];
         [splitPanel close];
-        
+
         return splitPanel.guid;
     } else {
         return nil;
     }
 }
 
-- (id)initWithWindowNibName:(NSString *)windowNibName
-{
+- (instancetype)initWithWindowNibName:(NSString *)windowNibName {
     self = [super initWithWindowNibName:windowNibName];
     if (self) {
         [self window];
@@ -55,9 +55,9 @@
     return self;
 }
 
-- (void)dealloc
-{
+- (void)dealloc {
     [guid_ release];
+    [parent_ release];
     [super dealloc];
 }
 
@@ -85,7 +85,7 @@
     [self _close];
 }
 
-#pragma mark BookmarkListView delegate methods
+#pragma mark - ProfileListViewDelegate
 
 - (void)profileTableSelectionDidChange:(id)profileTable
 {
@@ -98,6 +98,11 @@
 
 - (void)profileTableRowSelected:(id)profileTable
 {
+    NSString *guid = [bookmarks_ selectedGuid];
+    if (guid) {
+        self.guid = guid;
+        [self _close];
+    }
 }
 
 @end

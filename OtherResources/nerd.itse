@@ -1,0 +1,25 @@
+{
+    "entries": [
+        { "fontName": "SymbolsNF", "start": 9211, "count": 4 },
+        { "fontName": "SymbolsNF", "start": 9829, "count": 1 },
+        { "fontName": "SymbolsNF", "start": 9889, "count": 1 },
+        { "fontName": "SymbolsNF", "start": 10092, "count": 6 },
+        { "fontName": "SymbolsNF", "start": 57344, "count": 11 },
+        { "fontName": "SymbolsNF", "start": 57504, "count": 4 },
+        { "fontName": "SymbolsNF", "start": 57520, "count": 25 },
+        { "fontName": "SymbolsNF", "start": 57546, "count": 1 },
+        { "fontName": "SymbolsNF", "start": 57548, "count": 7 },
+        { "fontName": "SymbolsNF", "start": 57556, "count": 1 },
+        { "fontName": "SymbolsNF", "start": 57558, "count": 2 },
+        { "fontName": "SymbolsNF", "start": 57856, "count": 170 },
+        { "fontName": "SymbolsNF", "start": 58112, "count": 228 },
+        { "fontName": "SymbolsNF", "start": 58874, "count": 191 },
+        { "fontName": "SymbolsNF", "start": 59136, "count": 496 },
+        { "fontName": "SymbolsNF", "start": 60000, "count": 447 },
+        { "fontName": "SymbolsNF", "start": 60672, "count": 719 },
+        { "fontName": "SymbolsNF", "start": 61440, "count": 898 },
+        { "fontName": "SymbolsNF", "start": 62464, "count": 308 },
+        { "fontName": "SymbolsNF", "start": 983041, "count": 6896 }
+    ],
+    "version": 2
+}

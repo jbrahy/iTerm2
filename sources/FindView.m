@@ -28,16 +28,9 @@
 #import "FindView.h"
 #import "PseudoTerminal.h"
 #import "NSBezierPath+iTerm.h"
+#import "NSResponder+iTerm.h"
 
 @implementation FindView
-
-- (id)initWithFrame:(NSRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        // Initialization code here.
-    }
-    return self;
-}
 
 - (BOOL)isFlipped
 {
@@ -74,3 +67,49 @@
 }
 
 @end
+
+@implementation MinimalFindView {
+    NSVisualEffectView *_vev NS_AVAILABLE_MAC(10_14);
+}
+
+- (void)awakeFromNib {
+    _closeButton.image.template = YES;
+    _closeButton.alternateImage.template = YES;
+    _vev = [[NSVisualEffectView alloc] initWithFrame:NSInsetRect(self.bounds, 9, 9)];
+    _vev.wantsLayer = YES;
+    _vev.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    _vev.material = NSVisualEffectMaterialSheet;
+    _vev.state = NSVisualEffectStateActive;
+    _vev.layer.cornerRadius = 6;
+    _vev.layer.borderColor = [[NSColor grayColor] CGColor];
+    _vev.layer.borderWidth = 1;
+    [self addSubview:_vev positioned:NSWindowBelow relativeTo:self.subviews.firstObject];
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    _vev.frame = NSInsetRect(self.bounds, 9, 9);
+    [_delegate minimalFindViewDidLayout];
+}
+
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    NSRect frame = [self frame];
+    [self addCursorRect:NSMakeRect(0, 0, frame.size.width, frame.size.height)
+                 cursor:[NSCursor arrowCursor]];
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<%@: %p frame=%@ isHidden=%@ alpha=%@>",
+            [self class], self, NSStringFromRect(self.frame), @(self.hidden), @(self.alphaValue)];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+}
+
+- (BOOL)it_focusFollowsMouseImmune {
+    return YES;
+}
+
+@end
+

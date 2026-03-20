@@ -23,7 +23,7 @@
  * @param aDataObject		The data to include in the node.
  * @param aKey				The key the node is bound to.
  * @result					An initialized node.
- */ 
+ */
 - (id) initWithData:(id)aDataObject boundToKey:(id)aKey;
 
 
@@ -42,6 +42,7 @@
  * @param ident				The indent to use.
  */
 - (void) printWithIndent:(int)indent;
-
+- (NSString *)stringWithIndent:(int)indent
+                 dataFormatter:(NSString *(^NS_NOESCAPE)(NSString *, id data))dataFormatter;
 
 @end

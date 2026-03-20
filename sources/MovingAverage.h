@@ -8,21 +8,19 @@
 
 #import <Foundation/Foundation.h>
 
-@interface MovingAverage : NSObject {
-    double _alpha;
-    double _value;
-    NSTimeInterval _time;  // Time when -startTimer was called, or 0 if stopped.
-    NSTimeInterval _timePaused;  // Time at which -pauseTimer was called.
-}
+@interface MovingAverage : NSObject
 
-@property (nonatomic, assign) double alpha;  // Initialized to 0.5. Small values make updates affect the moving average more.
-@property (nonatomic, assign) double value;
+@property(nonatomic, assign) double alpha;  // Initialized to 0.5. Small values make updates affect the moving average more.
+@property(nonatomic, assign) double value;
+@property(nonatomic, readonly) NSTimeInterval timeSinceTimerStarted;
+@property(nonatomic, readonly) BOOL timerStarted;
+@property(nonatomic, readonly) NSInteger numberOfMeasurements;
 
 - (void)startTimer;
 - (void)pauseTimer;
 - (void)resumeTimer;
-- (NSTimeInterval)timeSinceTimerStarted;
 - (void)addValue:(double)value;
 - (BOOL)haveStartedTimer;
+- (void)reset;
 
 @end

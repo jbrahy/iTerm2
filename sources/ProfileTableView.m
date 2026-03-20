@@ -7,7 +7,9 @@
 
 #import "ProfileTableView.h"
 
-@implementation ProfileTableView
+@implementation ProfileTableView {
+    id<ProfileTableMenuHandler> handler_;
+}
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
@@ -29,8 +31,7 @@
     [super dealloc];
 }
 
-- (void)setMenuHandler:(NSObject<ProfileTableMenuHandler> *)handler
-{
+- (void)setMenuHandler:(id<ProfileTableMenuHandler>)handler {
     handler_ = handler;
 }
 
@@ -40,18 +41,6 @@
         return [handler_ menuForEvent:theEvent];
     }
     return nil;
-}
-
-// This is done to keep the framework from drawing the highlight and letting
-// higlightSelectionInClipRect: do it instead.
-- (NSCell *)preparedCellAtColumn:(NSInteger)column row:(NSInteger)row {
-    NSCell *cell = [super preparedCellAtColumn:column row:row];
-    if (cell.isHighlighted && self.window.isKeyWindow) {
-        cell.backgroundStyle = NSBackgroundStyleDark;
-        cell.highlighted = NO;
-    }
-
-    return cell;
 }
 
 - (void)highlightSelectionInClipRect:(NSRect)theClipRect {
@@ -68,11 +57,11 @@
 }
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
-    [self setNeedsDisplay];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
-    [self setNeedsDisplay];
+    [self setNeedsDisplay:YES];
 }
 
 @end

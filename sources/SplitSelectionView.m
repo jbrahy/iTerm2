@@ -6,6 +6,8 @@
 //
 
 #import "SplitSelectionView.h"
+#import "iTermAdvancedSettingsModel.h"
+#import "NSColor+iTerm.h"
 
 @interface SplitSelectionView ()
 
@@ -14,42 +16,34 @@
 @end
 
 @implementation SplitSelectionView {
-    BOOL _isMove;
+    SplitSessionHalf half_;
+    NSTrackingArea *trackingArea_;
+    id<SplitSelectionViewDelegate> delegate_;  // weak
+    __weak PTYSession *session_;
 }
 
-@synthesize cancelOnly = cancelOnly_;
-
-- (id)initWithFrame:(NSRect)frameRect
-{
+- (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
         half_ = kNoHalf;
-        _isMove = YES;
+        _mode = SplitSelectionViewModeTargetMove;
         [self setAlphaValue:0.9];
     }
     return self;
 }
 
-- (id)initAsCancelOnly:(BOOL)cancelOnly
-             withFrame:(NSRect)frame
-           withSession:(PTYSession *)session
-              delegate:(id<SplitSelectionViewDelegate>)delegate
-                  move:(BOOL)move {
+- (instancetype)initWithMode:(SplitSelectionViewMode)mode
+                   withFrame:(NSRect)frame
+                     session:(PTYSession *)session
+                    delegate:(id<SplitSelectionViewDelegate>)delegate {
     self = [self initWithFrame:frame];
     if (self) {
-        cancelOnly_ = cancelOnly;
+        _mode = mode;
         session_ = session;
         delegate_ = delegate;
-        _isMove = move;
         [self _createTrackingArea];
     }
     return self;
-}
-
-- (void)dealloc
-{
-    [trackingArea_ release];
-    [super dealloc];
 }
 
 - (void)_createTrackingArea
@@ -67,7 +61,7 @@
     [super setFrameSize:newSize];
     if (trackingArea_) {
         [self removeTrackingArea:trackingArea_];
-        [trackingArea_ release];
+        trackingArea_ = nil;
         [self _createTrackingArea];
     }
 }
@@ -75,9 +69,9 @@
 - (void)_showMessage:(NSString *)message inRect:(NSRect)frame
 {
     [[NSColor whiteColor] set];
-    NSMutableParagraphStyle *pStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+    NSMutableParagraphStyle *pStyle = [[NSMutableParagraphStyle alloc] init];
     [pStyle setParagraphStyle:[NSParagraphStyle defaultParagraphStyle]];
-    [pStyle setAlignment:NSCenterTextAlignment];
+    [pStyle setAlignment:NSTextAlignmentCenter];
 
     CGFloat fontSize = 25;
     NSMutableAttributedString* attributedString;
@@ -90,8 +84,8 @@
                 [NSColor whiteColor], NSForegroundColorAttributeName,
                 pStyle, NSParagraphStyleAttributeName,
                 nil];
-        attributedString = [[[NSMutableAttributedString alloc] initWithString:message
-                                                                   attributes:attrs] autorelease];
+        attributedString = [[NSMutableAttributedString alloc] initWithString:message
+                                                                  attributes:attrs];
         rect = NSMakeRect(frame.origin.x,
                           frame.origin.y + frame.size.height * 2.0 / 3.0,
                           frame.size.width,
@@ -102,9 +96,9 @@
     } while ([attributedString size].width > frame.size.width ||
              [attributedString size].height > frame.size.height ||
              rect.size.height + rect.origin.y > frame.origin.y + frame.size.height);
-                                                                                          
-    
-    NSShadow *theShadow = [[[NSShadow  alloc] init] autorelease];
+
+
+    NSShadow *theShadow = [[NSShadow  alloc] init];
     [theShadow setShadowOffset:NSMakeSize(0, 0)];
     [theShadow setShadowBlurRadius:4.0];
     [theShadow setShadowColor:[NSColor blackColor]];
@@ -114,70 +108,109 @@
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
-    if (cancelOnly_) {
-        [[NSColor colorWithCalibratedRed:0 green:0.5 blue:0 alpha:1] set];
-        NSRectFill(dirtyRect);
-        
-        NSString *theMessage;
-        if (_isMove) {
-            theMessage = @"Select a destination pane";
-        } else {
-            theMessage = @"Select pane to swap with";
-        }
-        [self _showMessage:theMessage inRect:self.frame];
-    } else {
-        NSRect highlightRect;
-        NSRect clearRect;
-        NSRect rect = [self frame];
-        switch (half_) {
-            case kNoHalf:
-                highlightRect = NSZeroRect;
-                clearRect = rect;
-                break;
-                
-            case kSouthHalf:
-                NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.height / 2, NSMinYEdge);
-                break;
-
-            case kNorthHalf:
-                NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.height / 2, NSMaxYEdge);
-                break;
-
-            case kWestHalf:
-                NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.width / 2, NSMinXEdge);
-                break;
-
-            case kEastHalf:
-                NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.width / 2, NSMaxXEdge);
-                break;
-                
-            case kFullPane:
-                highlightRect = [self frame];
-                clearRect = NSZeroRect;
-                break;
-        }
-        
-        [[NSColor colorWithCalibratedRed:0.5 green:0 blue:0 alpha:1] set];
-        NSRectFill(highlightRect);
-
-        [[NSColor whiteColor] set];
-        NSFrameRect(highlightRect);
-
-        highlightRect = NSInsetRect(highlightRect, 1, 1);
-        [[NSColor blackColor] set];
-        NSFrameRect(highlightRect);
-
-        if (delegate_ && half_ != kNoHalf) {
-            NSString *theMessage;
-            if (_isMove) {
-                theMessage = @"Click to move source pane to this split";
-            } else {
-                theMessage = @"Click to swap source pane with this one";
-            }
-            [self _showMessage:theMessage inRect:highlightRect];
-        }
+    dirtyRect = NSIntersectionRect(dirtyRect, self.bounds);
+    switch (_mode) {
+        case SplitSelectionViewModeSourceMove:
+            [self drawSourceWithMessage:@"Select a destination pane" rect:dirtyRect];
+            return;
+        case SplitSelectionViewModeSourceSwap:
+            [self drawSourceWithMessage:@"Select pane to swap with" rect:dirtyRect];
+            return;
+        case SplitSelectionViewModeTargetMove:
+            [self drawTargetWithMessage:@"Click to move source pane to this split"];
+            return;
+        case SplitSelectionViewModeTargetSwap:
+            [self drawTargetWithMessage:@"Click to swap source pane with this one"];
+            return;
+        case SplitSelectionViewModeInspect:
+            [self drawInspectWithMessage:@"Click to inspect" rect:dirtyRect];
+            return;
+        case SplitSelectionViewModeSelect:
+            [self drawInspectWithMessage:@"Click to select" rect:dirtyRect];
+            return;
     }
 }
+
+- (void)drawSourceWithMessage:(NSString *)message rect:(NSRect)dirtyRect {
+    NSString *hexColor = [iTermAdvancedSettingsModel splitPaneSourceFillColor];
+    NSColor *color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor colorWithCalibratedRed:0 green:0.5 blue:0 alpha:1] set];
+    NSRectFill(dirtyRect);
+    
+    NSRect highlightRect = self.frame;
+    hexColor = [iTermAdvancedSettingsModel splitPaneSourceBorderColor];
+    color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor whiteColor] set];
+    NSFrameRect(highlightRect);
+    
+    highlightRect = NSInsetRect(highlightRect, 1, 1);
+    hexColor = [iTermAdvancedSettingsModel splitPaneSourceInnerBorderColor];
+    color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor blackColor] set];
+    NSFrameRect(highlightRect);
+    
+    [self _showMessage:message inRect:self.frame];
+}
+
+- (void)drawTargetWithMessage:(NSString *)theMessage {
+    NSRect highlightRect;
+    NSRect clearRect;
+    NSRect rect = [self frame];
+    switch (half_) {
+        case kNoHalf:
+            highlightRect = NSZeroRect;
+            clearRect = rect;
+            break;
+
+        case kSouthHalf:
+            NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.height / 2, NSMinYEdge);
+            break;
+
+        case kNorthHalf:
+            NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.height / 2, NSMaxYEdge);
+            break;
+
+        case kWestHalf:
+            NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.width / 2, NSMinXEdge);
+            break;
+
+        case kEastHalf:
+            NSDivideRect([self frame], &highlightRect, &clearRect, rect.size.width / 2, NSMaxXEdge);
+            break;
+
+        case kFullPane:
+            highlightRect = [self frame];
+            clearRect = NSZeroRect;
+            break;
+    }
+
+    NSString *hexColor = [iTermAdvancedSettingsModel splitPaneTargetDropFillColor];
+    NSColor *color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor colorWithCalibratedRed:0.5 green:0 blue:0 alpha:1] set];
+    NSRectFill(highlightRect);
+
+    hexColor = [iTermAdvancedSettingsModel splitPaneTargetDropBorderColor];
+    color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor whiteColor] set];
+    NSFrameRect(highlightRect);
+
+    highlightRect = NSInsetRect(highlightRect, 1, 1);
+    hexColor = [iTermAdvancedSettingsModel splitPaneTargetDropInnerBorderColor];
+    color = [NSColor colorFromHexString:hexColor];
+    [color ?: [NSColor blackColor] set];
+    NSFrameRect(highlightRect);
+
+    if (delegate_ && half_ != kNoHalf) {
+        [self _showMessage:theMessage inRect:highlightRect];
+    }
+}
+
+- (void)drawInspectWithMessage:(NSString *)message rect:(NSRect)dirtyRect {
+    [[NSColor colorWithCalibratedRed:0 green:0.5 blue:0.25 alpha:1] set];
+    NSRectFill(dirtyRect);
+    [self _showMessage:message inRect:self.frame];
+}
+
 
 - (void)mouseDown:(NSEvent *)theEvent
 {
@@ -206,10 +239,18 @@
 
 - (void)updateAtPoint:(NSPoint)point
 {
-    if (!_isMove) {
-        half_ = kFullPane;
-        [self setNeedsDisplay:YES];
-        return;
+    switch (_mode) {
+        case SplitSelectionViewModeTargetSwap:
+        case SplitSelectionViewModeSourceSwap:
+        case SplitSelectionViewModeInspect:
+        case SplitSelectionViewModeSelect:
+            half_ = kFullPane;
+            [self setNeedsDisplay:YES];
+            return;
+
+        case SplitSelectionViewModeTargetMove:
+        case SplitSelectionViewModeSourceMove:
+            break;
     }
     SplitSessionHalf possibilities[4];
     CGFloat scores[4];
@@ -228,7 +269,7 @@
         scores[numPossibilities] = (self.frame.size.height - point.y) / self.frame.size.height;
         possibilities[numPossibilities++] = kNorthHalf;
     }
-    
+
     CGFloat minScore = INFINITY;
     int bestIndex = 0;
     for (int i = 0; i < numPossibilities; i++) {

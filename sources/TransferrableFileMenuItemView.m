@@ -7,8 +7,25 @@
 //
 
 #import "TransferrableFileMenuItemView.h"
+#import "NSStringITerm.h"
 
-const CGFloat rightMargin = 5;
+const CGFloat progressIndicatorHeight = 6;
+
+static CGFloat TransferrableFileMenuItemViewLeftMargin(void) {
+    if (@available(macOS 10.16, *)) {
+        return 14;
+    } else {
+        return 20;
+    }
+}
+
+static CGFloat TransferrableFileMenuItemViewRightMargin(void) {
+    if (@available(macOS 10.16, *)) {
+        return 14;
+    } else {
+        return 8;
+    }
+}
 
 @interface TransferrableFileMenuItemView ()
 // This is used as part of the bug workaround in sanityCheckSiblings to ensure we don't try to
@@ -16,15 +33,18 @@ const CGFloat rightMargin = 5;
 @property(nonatomic, assign) BOOL drawPending;
 @end
 
-@implementation TransferrableFileMenuItemView
+@implementation TransferrableFileMenuItemView {
+    __weak NSVisualEffectView *_effectView;
+}
 
-- (id)initWithFrame:(NSRect)frameRect {
+- (instancetype)initWithFrame:(NSRect)frameRect effectView:(NSVisualEffectView *)effectView {
     self = [super initWithFrame:frameRect];
     if (self) {
-        _progressIndicator = [[iTermProgressIndicator alloc] initWithFrame:NSMakeRect(5,
+        _effectView = effectView;
+        _progressIndicator = [[iTermProgressIndicator alloc] initWithFrame:NSMakeRect(TransferrableFileMenuItemViewLeftMargin(),
                                                                                       17,
-                                                                                      frameRect.size.width - 10,
-                                                                                      10)];
+                                                                                      frameRect.size.width - TransferrableFileMenuItemViewLeftMargin() - TransferrableFileMenuItemViewRightMargin(),
+                                                                                      progressIndicatorHeight)];
         [self addSubview:_progressIndicator];
     }
     return self;
@@ -36,20 +56,6 @@ const CGFloat rightMargin = 5;
     [_statusMessage release];
     [_progressIndicator release];
     [super dealloc];
-}
-
-- (NSString *)formattedSize:(long long)size {
-    if (size < 0) {
-        return @"?";
-    } else if (size < 1024) {
-        return [NSString stringWithFormat:@"%lld bytes", size];
-    } else if (size < 1024 * 1024) {
-        return [NSString stringWithFormat:@"%lld KB", size / 1024];
-    } else if (size < 1024 * 1024 * 1024) {
-        return [NSString stringWithFormat:@"%0.1f MB", size / (1024.0 * 1024.0)];
-    } else {
-        return [NSString stringWithFormat:@"%0.2f GB", size / (1024.0 * 1024.0 * 1024.0)];
-    }
 }
 
 // Works around an OS bug. If the menu is closed with an item selected and then reopened, the
@@ -73,38 +79,39 @@ const CGFloat rightMargin = 5;
     }
 }
 
-- (void)drawRect:(NSRect)dirtyRect
-{
-	[super drawRect:dirtyRect];
+- (void)drawRect:(NSRect)dirtyRect {
+     [super drawRect:dirtyRect];
     NSColor *textColor;
     NSColor *grayColor;
 
     [self sanityCheckSiblings];
     self.drawPending = NO;
+
     if ([[self enclosingMenuItem] isHighlighted]) {
         self.lastDrawnHighlighted = YES;
-        [[NSColor selectedMenuItemColor] set];
         textColor = [NSColor selectedMenuItemTextColor];
-        grayColor = [NSColor lightGrayColor];
+        grayColor = [NSColor alternateSelectedControlTextColor];
+        _effectView.state = NSVisualEffectStateActive;
+        _effectView.hidden = NO;
     } else {
         self.lastDrawnHighlighted = NO;
-        [[NSColor whiteColor] set];
-        textColor = [NSColor blackColor];
-        grayColor = [NSColor grayColor];
+        textColor = [NSColor textColor];
+        grayColor = [[NSColor textColor] colorWithAlphaComponent:0.8];
+        [[NSColor clearColor] set];
+        _effectView.state = NSVisualEffectStateInactive;
+        _effectView.hidden = YES;
     }
-    NSRectFill(dirtyRect);
 
     NSMutableParagraphStyle *leftAlignStyle =
         [[[NSParagraphStyle defaultParagraphStyle] mutableCopy] autorelease];
-    [leftAlignStyle setAlignment:NSLeftTextAlignment];
+    [leftAlignStyle setAlignment:NSTextAlignmentLeft];
     [leftAlignStyle setLineBreakMode:NSLineBreakByTruncatingTail];
 
     NSMutableParagraphStyle *rightAlignStyle =
         [[[NSParagraphStyle defaultParagraphStyle] mutableCopy] autorelease];
-    [rightAlignStyle setAlignment:NSRightTextAlignment];
+    [rightAlignStyle setAlignment:NSTextAlignmentRight];
     [rightAlignStyle setLineBreakMode:NSLineBreakByTruncatingTail];
 
-    const CGFloat leftMargin = 5;
     NSFont *theFont = [NSFont systemFontOfSize:14];
     NSFont *smallFont = [NSFont systemFontOfSize:10];
     NSDictionary *filenameAttributes = @{ NSParagraphStyleAttributeName: leftAlignStyle,
@@ -121,48 +128,48 @@ const CGFloat rightMargin = 5;
     if (_size >= 0) {
         sizeString =
             [NSString stringWithFormat:@"%@ of %@",
-                [self formattedSize:_bytesTransferred],
-                [self formattedSize:_size]];
+                [NSString it_formatBytes:_bytesTransferred],
+                [NSString it_formatBytes:_size]];
     } else {
         sizeString = @"";
     }
     const CGFloat smallTextHeight = [sizeString sizeWithAttributes:sizeAttributes].height;
 
-    [[NSColor blackColor] set];
+    [textColor set];
 
-    CGFloat topMargin = 1;
+    CGFloat topMargin = 3;
     CGFloat topY = self.bounds.size.height - textHeight - topMargin;
-    CGFloat bottomY = 1;
+    CGFloat bottomY = 3;
 
     // Draw file name
-    NSRect filenameRect = NSMakeRect(leftMargin,
+    NSRect filenameRect = NSMakeRect(TransferrableFileMenuItemViewLeftMargin(),
                                      topY,
-                                     self.bounds.size.width - rightMargin,
+                                     self.bounds.size.width - TransferrableFileMenuItemViewLeftMargin() - TransferrableFileMenuItemViewRightMargin(),
                                      textHeight);
-    
+
     [_filename drawInRect:filenameRect
            withAttributes:filenameAttributes];
 
     // Draw subheading
-    NSRect subheadingRect = NSMakeRect(leftMargin,
+    NSRect subheadingRect = NSMakeRect(TransferrableFileMenuItemViewLeftMargin(),
                                        topY - smallTextHeight - 1,
-                                       self.bounds.size.width - rightMargin,
+                                       self.bounds.size.width - TransferrableFileMenuItemViewLeftMargin() - TransferrableFileMenuItemViewRightMargin(),
                                        smallTextHeight);
     [_subheading drawInRect:subheadingRect withAttributes:smallGrayAttributes];
-    
+
     // Draw status label
     if (_statusMessage) {
-        [_statusMessage drawInRect:NSMakeRect(leftMargin,
+        [_statusMessage drawInRect:NSMakeRect(TransferrableFileMenuItemViewLeftMargin(),
                                               bottomY,
-                                              self.bounds.size.width - rightMargin,
+                                              self.bounds.size.width - TransferrableFileMenuItemViewLeftMargin() - TransferrableFileMenuItemViewRightMargin(),
                                               smallTextHeight)
                     withAttributes:smallGrayAttributes];
     }
-    
+
     // Draw size
-    [sizeString drawInRect:NSMakeRect(0,
+    [sizeString drawInRect:NSMakeRect(TransferrableFileMenuItemViewLeftMargin(),
                                       bottomY,
-                                      self.bounds.size.width - 5,
+                                      self.bounds.size.width - TransferrableFileMenuItemViewRightMargin() - TransferrableFileMenuItemViewLeftMargin(),
                                       smallTextHeight)
             withAttributes:sizeAttributes];
 }

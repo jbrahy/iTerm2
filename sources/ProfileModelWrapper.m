@@ -6,13 +6,21 @@
 //
 
 #import "ProfileModelWrapper.h"
+#import "DebugLogging.h"
+#import "NSArray+iTerm.h"
 
-@implementation ProfileModelWrapper
+@implementation ProfileModelWrapper {
+    ProfileModel* underlyingModel;
+    NSMutableArray<ProfileTableRow *> *bookmarks;
+    NSMutableString* filter;
+    NSArray* sortDescriptors;
+}
 
-- (id)initWithModel:(ProfileModel*)model
-{
+- (instancetype)initWithModel:(ProfileModel*)model
+                 profileTypes:(ProfileType)profileTypes {
     self = [super init];
     if (self) {
+        _profileTypes = profileTypes;
         underlyingModel = model;
         bookmarks = [[NSMutableArray alloc] init];
         filter = [[NSMutableString alloc] init];
@@ -64,6 +72,12 @@
     return [[bookmarks objectAtIndex:i] bookmark];
 }
 
+- (NSArray<Profile *> *)profiles {
+    return [bookmarks mapWithBlock:^id(ProfileTableRow *row) {
+        return row.bookmark;
+    }];
+}
+
 - (int)indexOfProfileWithGuid:(NSString*)guid
 {
     for (int i = 0; i < [bookmarks count]; ++i) {
@@ -80,15 +94,19 @@
 }
 
 - (void)sync {
+    DLog(@"Synchronize profile model wrapper with underlying bookmarks");
     [bookmarks removeAllObjects];
-    NSArray* filteredBookmarks = [underlyingModel bookmarkIndicesMatchingFilter:filter
-                                                                         orGuid:self.lockedGuid];
-    for (NSNumber* n in filteredBookmarks) {
+
+    NSArray *filteredBookmarks = [underlyingModel profileIndicesMatchingFilter:filter
+                                                                        orGuid:self.lockedGuid
+                                                                        ofType:_profileTypes];
+    for (NSNumber *n in filteredBookmarks) {
         int i = [n intValue];
         [bookmarks addObject:[[[ProfileTableRow alloc] initWithBookmark:[underlyingModel profileAtIndex:i]
                                                         underlyingModel:underlyingModel] autorelease]];
     }
     [self sort];
+    DLog(@"There are now %d bookmarks", (int)bookmarks.count);
 }
 
 - (void)moveBookmarkWithGuid:(NSString*)guid toIndex:(int)row
@@ -116,6 +134,7 @@
     for (ProfileTableRow* theRow in bookmarks) {
         [underlyingModel moveGuid:[theRow guid] toRow:i++];
     }
+    [underlyingModel recordSortOrder];
     [underlyingModel rebuildMenus];
     [underlyingModel flush];
 }
@@ -136,8 +155,14 @@
 
 - (void)setFilter:(NSString*)newFilter
 {
+    self.lockedGuid = nil;
     [filter release];
     filter = [[NSMutableString stringWithString:newFilter] retain];
+}
+
+- (void)setProfileTypes:(ProfileType)profileTypes {
+    _profileTypes = profileTypes;
+    self.lockedGuid = nil;
 }
 
 @end

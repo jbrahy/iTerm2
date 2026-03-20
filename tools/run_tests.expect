@@ -1,0 +1,32 @@
+#!/usr/bin/expect -f
+
+if {$argc < 1} {
+    puts "Usage: run_tests.expect <test-name>"
+    puts "Example: run_tests.expect ModernTests/iTermScriptFunctionCallTest/testSignature"
+    exit 1
+}
+
+set test_name [lindex $argv 0]
+set timeout -1
+
+if {[info exists env(SIGNED)] && $env(SIGNED) eq "1"} {
+    set signing_flags {}
+} else {
+    set signing_flags {CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO}
+}
+
+spawn xcodebuild test -project iTerm2.xcodeproj -scheme ModernTests -only-testing:$test_name -parallel-testing-enabled NO {*}$signing_flags
+
+expect {
+    "Program crashed" {
+        send_user "\n\n*** Detected interactive debug prompt, killing process ***\n\n"
+        exec kill -9 [exp_pid]
+        exec killall -9 iTerm2
+        wait
+        exit 1
+    }
+    eof {
+        catch wait result
+        exit [lindex $result 3]
+    }
+}

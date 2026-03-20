@@ -7,9 +7,11 @@
 //
 
 #import "EventMonitorView.h"
-#import "PointerPrefsController.h"
+
 #import "FutureMethods.h"
 #import "iTermApplicationDelegate.h"
+#import "NSEvent+iTerm.h"
+#import "PointerPrefsController.h"
 #import "ThreeFingerTapGestureRecognizer.h"
 
 @implementation EventMonitorView {
@@ -18,10 +20,11 @@
     int numTouches_;
 
     ThreeFingerTapGestureRecognizer *_threeFingerTapGestureRecognizer;
+    NSInteger _maximumStage;
 }
 
 - (void)awakeFromNib {
-    [self setAcceptsTouchEvents:YES];
+    self.allowedTouchTypes = NSTouchTypeMaskIndirect;
     [self setWantsRestingTouches:YES];
     _threeFingerTapGestureRecognizer =
         [[ThreeFingerTapGestureRecognizer alloc] initWithTarget:self
@@ -31,8 +34,6 @@
 
 - (void)dealloc {
     [_threeFingerTapGestureRecognizer disconnectTarget];
-    [_threeFingerTapGestureRecognizer release];
-    [super dealloc];
 }
 
 - (void)touchesBeganWithEvent:(NSEvent *)ev {
@@ -70,10 +71,11 @@
     DLog(@"EventMonitorView mouseUp:%@", theEvent);
     if (numTouches_ == 3) {
         [pointerPrefs_ setGesture:kThreeFingerClickGesture
-                        modifiers:[theEvent modifierFlags]];
-    } else {
+                        modifiers:[theEvent it_modifierFlags]];
+    } else if (_maximumStage < 2) {
         [self showNotSupported];
     }
+    _maximumStage = 0;
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -83,6 +85,17 @@
     } else {
         [super mouseDown:event];
     }
+}
+
+- (void)pressureChangeWithEvent:(NSEvent *)event {
+    ITERM_IGNORE_PARTIAL_BEGIN
+    if ([event respondsToSelector:@selector(stage)]) {
+        _maximumStage = MAX(_maximumStage, event.stage);
+        if (event.stage == 2) {
+            [pointerPrefs_ setGesture:kForceTouchSingleClick modifiers:[event it_modifierFlags]];
+        }
+    }
+    ITERM_IGNORE_PARTIAL_END
 }
 
 - (void)rightMouseDown:(NSEvent*)event {
@@ -103,7 +116,7 @@
     DLog(@"EventMonitorView rightMouseUp:%@", theEvent);
     int buttonNumber = 1;
     int clickCount = [theEvent clickCount];
-    int modMask = [theEvent modifierFlags];
+    int modMask = [theEvent it_modifierFlags];
     [pointerPrefs_ setButtonNumber:buttonNumber clickCount:clickCount modifiers:modMask];
     [super mouseDown:theEvent];
 }
@@ -113,23 +126,23 @@
     DLog(@"EventMonitorView otherMouseDown:%@", theEvent);
     int buttonNumber = [theEvent buttonNumber];
     int clickCount = [theEvent clickCount];
-    int modMask = [theEvent modifierFlags];
+    int modMask = [theEvent it_modifierFlags];
     [pointerPrefs_ setButtonNumber:buttonNumber clickCount:clickCount modifiers:modMask];
     [super mouseDown:theEvent];
 }
 
 - (void)drawRect:(NSRect)dirtyRect
 {
-    [[NSColor whiteColor] set];
-    NSRectFill(dirtyRect);
-    [[NSColor blackColor] set];
+    [[NSColor controlBackgroundColor] set];
+    NSRectFill(self.bounds);
+    [[NSColor separatorColor] set];
     NSFrameRect(NSMakeRect(0, 0, self.frame.size.width, self.frame.size.height));
 
     [super drawRect:dirtyRect];
 }
 
 - (void)threeFingerTap:(NSEvent *)event {
-    [pointerPrefs_ setGesture:kThreeFingerClickGesture modifiers:[event modifierFlags]];
+    [pointerPrefs_ setGesture:kThreeFingerClickGesture modifiers:[event it_modifierFlags]];
 }
 
 @end

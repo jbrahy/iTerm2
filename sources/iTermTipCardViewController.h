@@ -22,6 +22,11 @@
 // View that contains all subviews.
 @property(nonatomic, readonly) NSView *containerView;
 
+@property (nonatomic, readonly) iTermTipCardActionButton *currentlySelectedButton;
+
+@property (nonatomic, copy) void (^didDrag)(void);
+@property (nonatomic, copy) void (^willDrag)(void);
+
 // Update the card title.
 - (void)setTitleString:(NSString *)titleString;
 
@@ -37,6 +42,12 @@
 
 // Add an action button. |image| should be 22x22pt. |block| is called on click.
 - (iTermTipCardActionButton *)addActionWithTitle:(NSString *)title
+                                            icon:(NSImage *)image
+                                           block:(void (^)(id card))block;
+
+// The shortcut is merely an indicator. It's up to the caller to register a hotkey and handle it.
+- (iTermTipCardActionButton *)addActionWithTitle:(NSString *)title
+                                        shortcut:(NSString *)shortcut
                                             icon:(NSImage *)image
                                            block:(void (^)(id card))block;
 
@@ -57,7 +68,7 @@
               originalCardFrame:(NSRect)originalCardFrame
              postAnimationFrame:(NSRect)postAnimationFrame
                  superviewWidth:(CGFloat)superviewWidth
-                          block:(void (^)())block;
+                          block:(void (^)(void))block;
 
 // Make two buttons share a row. Currently, this assumes a row has either 1 or
 // 2 buttons, and both titles must be for existing buttons.

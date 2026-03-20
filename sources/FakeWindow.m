@@ -8,7 +8,7 @@
  **
  **  Project: iTerm2
  **
- **  Description: Shell window that takes over for a session during instant 
+ **  Description: Shell window that takes over for a session during instant
  **  replay.
  **
  **  This program is free software; you can redistribute it and/or modify
@@ -30,11 +30,35 @@
 #import "PTYSession.h"
 #import "PTYTab.h"
 
-@implementation FakeWindow
+@implementation FakeWindow {
+    // FakeWindow always has exactly one session.
+    PTYSession* session;
 
-- (id)initFromRealWindow:(NSWindowController<iTermWindowController> *)aTerm
-                 session:(PTYSession*)aSession
-{
+    // Saved state from old window.
+    BOOL isFullScreen;
+    BOOL isLionFullScreen;
+    BOOL isMiniaturized;
+    NSRect frame;
+    NSScreen* screen;
+    NSWindowController<iTermWindowController> * realWindow;
+
+    // Changes the session has initiated that will be delayed and performed
+    // in -[rejoin:].
+    BOOL hasPendingBlurChange;
+    double pendingBlurRadius;
+    BOOL pendingBlur;
+    BOOL hasPendingClose;
+    BOOL hasPendingFitWindowToTab;
+    BOOL hasPendingSizeChange;
+    int pendingW;
+    int pendingH;
+    BOOL hasPendingSetWindowTitle;
+
+    BOOL scrollbarShouldBeVisible;
+}
+
+- (instancetype)initFromRealWindow:(NSWindowController<iTermWindowController> *)aTerm
+                           session:(PTYSession*)aSession {
     self = [super init];
     if (!self) {
         return nil;
@@ -45,15 +69,10 @@
     isMiniaturized = [[aTerm window] isMiniaturized];
     frame = [[aTerm window] frame];
     screen = [[aTerm window] screen];
-    session = [aSession retain];
+    session = aSession;
     realWindow = aTerm;
     scrollbarShouldBeVisible = [aTerm scrollbarShouldBeVisible];
     return self;
-}
-
-- (void)dealloc {
-    [session release];
-    [super dealloc];
 }
 
 - (void)rejoin:(NSWindowController<iTermWindowController> *)aTerm
@@ -78,22 +97,19 @@
         [aTerm sessionInitiatedResize:session width:pendingW height:pendingH];
     }
     if (hasPendingFitWindowToTab) {
-        [aTerm fitWindowToTab:[session tab]];
+        [aTerm fitWindowToTab:[aTerm tabForSession:session]];
     }
     if (hasPendingSetWindowTitle) {
         [aTerm setWindowTitle];
     }
-    if (hasPendingResetTempTitle) {
-        [aTerm resetTempTitle];
-    }
     [aTerm updateTabColors];
 }
 
-- (void)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height
-{
+- (BOOL)sessionInitiatedResize:(PTYSession*)session width:(int)width height:(int)height {
     hasPendingSizeChange = YES;
     pendingW = width;
     pendingH = height;
+    return YES;
 }
 
 - (BOOL)fullScreen
@@ -142,11 +158,6 @@
     pendingBlur = NO;
 }
 
-- (BOOL)tempTitle
-{
-    return NO;
-}
-
 - (void)fitWindowToTab:(PTYTab*)tab
 {
     hasPendingFitWindowToTab = YES;
@@ -160,11 +171,6 @@
 - (void)setWindowTitle
 {
     hasPendingSetWindowTitle = YES;
-}
-
-- (void)resetTempTitle
-{
-    hasPendingResetTempTitle = YES;
 }
 
 - (PTYTab*)currentTab
@@ -221,5 +227,17 @@
 - (void)updateTabColors
 {
 }
+
+- (BOOL)movesWhenDraggedOntoSelf {
+    return NO;
+}
+
+- (void)createDuplicateOfTab:(PTYTab *)theTab {
+}
+
+- (void)softCloseSession:(PTYSession *)aSession {
+    hasPendingClose = YES;  // TODO: This isn't right with panes.
+}
+
 
 @end

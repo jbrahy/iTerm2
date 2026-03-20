@@ -1,5 +1,3 @@
-// -*- mode:objc -*-
-// $Id: iTermApplicationDelegate.h,v 1.21 2006-11-21 19:24:29 yfabian Exp $
 /*
  **  iTermApplicationDelegate.h
  **
@@ -30,22 +28,31 @@
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
 #import "DebugLogging.h"
+#import "iTermApplication.h"
 
+@class iTermScriptsMenuController;
+@class ITMNotification;
 @class PseudoTerminal;
+@class PTYSession;
+
 extern NSString *kUseBackgroundPatternIndicatorChangedNotification;
-extern NSString *const kMultiLinePasteWarningUserDefaultsKey;
 extern NSString *const kSavedArrangementDidChangeNotification;
 extern NSString *const kNonTerminalWindowBecameKeyNotification;
 
 extern NSString *const kMarkAlertActionModalAlert;
 extern NSString *const kMarkAlertActionPostNotification;
+extern NSString *const kMarkAlertActionRingBell;
+extern NSString *const kShowFullscreenTabsSettingDidChange;
+extern NSString *const iTermApplicationWillTerminate;
+extern NSString *const iTermDidToggleAlertOnMarksInOffscreenSessionsNotification;
 
-int DebugLogImpl(const char *file, int line, const char *function, NSString* value);
+void TurnOnDebugLoggingAutomatically(void);
 
-@interface iTermApplicationDelegate : NSObject<NSApplicationDelegate>
+@interface iTermApplicationDelegate : NSObject<iTermApplicationDelegate>
 
 @property(nonatomic, readonly) BOOL workspaceSessionActive;
-@property(nonatomic, readonly) BOOL isApplescriptTestApp;
+@property(nonatomic, readonly) BOOL isAppleScriptTestApp;
+@property(nonatomic, readonly) BOOL isRunningOnTravis;
 
 // Returns one of the kMarkAlertAction strings defined above.
 @property(nonatomic, readonly) NSString *markAlertAction;
@@ -53,87 +60,34 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
 // Is Sparkle in the process of restarting us?
 @property(nonatomic, readonly) BOOL sparkleRestarting;
 
-- (void)awakeFromNib;
-
-// NSApplication Delegate methods
-- (NSMenu*)bookmarksMenu;
-
-- (IBAction)undo:(id)sender;
-- (IBAction)toggleToolbeltTool:(NSMenuItem *)menuItem;
-- (IBAction)toggleFullScreenTabBar:(id)sender;
-- (IBAction)maximizePane:(id)sender;
-- (IBAction)toggleUseTransparency:(id)sender;
-- (IBAction)toggleSecureInput:(id)sender;
-
-- (IBAction)newWindow:(id)sender;
-- (IBAction)newSessionWithSameProfile:(id)sender;
-- (IBAction)newSession:(id)sender;
-- (IBAction)buildScriptMenu:(id)sender;
-
-- (IBAction)debugLogging:(id)sender;
-- (IBAction)openQuickly:(id)sender;
+@property(nonatomic, readonly) BOOL useBackgroundPatternIndicator;
+@property(nonatomic, readonly) BOOL warnBeforeMultiLinePaste;
+@property(nonatomic, readonly) NSMenu *downloadsMenu;
+@property(nonatomic, readonly) NSMenu *uploadsMenu;
+@property(nonatomic, readonly) iTermScriptsMenuController *scriptsMenuController;
+@property(nonatomic, readonly) BOOL toggleFullScreenHasCmdEnterShortcut;
 
 - (void)updateMaximizePaneMenuItem;
 - (void)updateUseTransparencyMenuItem;
 
-    // About window
-- (IBAction)showAbout:(id)sender;
-
-- (IBAction)makeDefaultTerminal:(id)sender;
-- (IBAction)unmakeDefaultTerminal:(id)sender;
-
-- (IBAction)saveWindowArrangement:(id)sender;
-
-- (IBAction)showPrefWindow:(id)sender;
-- (IBAction)showBookmarkWindow:(id)sender;
-- (IBAction)instantReplayPrev:(id)sender;
-- (IBAction)instantReplayNext:(id)sender;
-
-    // navigation
-- (IBAction)previousTerminal: (id) sender;
-- (IBAction)nextTerminal: (id) sender;
-- (IBAction)arrangeHorizontally:(id)sender;
-
-// Notifications
-- (void)reloadMenus: (NSNotification *) aNotification;
-- (void)buildSessionSubmenu: (NSNotification *) aNotification;
-- (void)reloadSessionMenus: (NSNotification *) aNotification;
-- (void)nonTerminalWindowBecameKey: (NSNotification *) aNotification;
-
-// font control
-- (IBAction) biggerFont: (id) sender;
-- (IBAction) smallerFont: (id) sender;
-
-// Paste speed control
-- (IBAction)pasteFaster:(id)sender;
-- (IBAction)pasteSlower:(id)sender;
-- (IBAction)pasteSlowlyFaster:(id)sender;
-- (IBAction)pasteSlowlySlower:(id)sender;
-
-- (IBAction)toggleMultiLinePasteWarning:(id)sender;
-
-// size
-- (IBAction)returnToDefaultSize:(id)sender;
-- (IBAction)exposeForTabs:(id)sender;
-- (IBAction)editCurrentSession:(id)sender;
-
-- (IBAction)toggleUseBackgroundPatternIndicator:(id)sender;
-- (BOOL)useBackgroundPatternIndicator;
-
 - (void)makeHotKeyWindowKeyIfOpen;
-
-- (void)updateBroadcastMenuState;
 
 // Call this when the user has any nontrivial interaction with a session, such as typing in it or closing a window.
 - (void)userDidInteractWithASession;
-- (BOOL)warnBeforeMultiLinePaste;
 
-- (NSMenu *)downloadsMenu;
-- (NSMenu *)uploadsMenu;
+- (void)openPasswordManagerToAccountName:(NSString *)name inSession:(PTYSession *)session;
+- (void)openPasswordManagerToAccountName:(NSString *)name inSession:(PTYSession *)session forUser:(BOOL)forUser didSendUserName:(void (^)(void))completion;
 
-- (void)openPasswordManagerToAccountName:(NSString *)name;
+- (void)didToggleTraditionalFullScreenMode;
+- (void)willRestoreWindow;
+- (void)newTabAtIndex:(NSNumber *)index;
 
-- (PseudoTerminal *)currentTerminal;
-- (NSArray*)terminals;
+#pragma mark - Actions
+
+- (void)toggleToolbeltTool:(id)sender;
+- (void)newSession:(id)sender;
+- (void)undo:(id)sender;
+- (void)showPrefWindow:(id)sender;
+- (IBAction)openDashboard:(id)sender;
 
 @end

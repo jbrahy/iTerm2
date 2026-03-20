@@ -1,7 +1,7 @@
 /*
  **  DVRDecoder.h
  **
- **  Copyright 20101
+ **  Copyright 2010
  **
  **  Author: George Nachman
  **
@@ -31,25 +31,11 @@
 #import "DVRBuffer.h"
 
 @interface DVRDecoder : NSObject
-{
-    // Circular buffer not owned by us.
-    DVRBuffer* buffer_;
 
-    // Most recent frame's metadata.
-    DVRFrameInfo info_;
+@property(nonatomic, readonly) long long timestamp;
+@property(nonatomic, readonly) int migrateFromVersion;
 
-    // Most recent frame.
-    char* frame_;
-
-    // Length of frame.
-    int length_;
-
-    // Most recent frame's key (not timestamp).
-    long long key_;
-}
-
-- (id)initWithBuffer:(DVRBuffer*)buffer;
-- (void)dealloc;
+- (instancetype)initWithBuffer:(DVRBuffer*)buffer;
 
 // Jump to a given timestamp, or the next available frame. Returns true on success.
 // Returns false if timestamp is later than the last timestamp or there are no frames.
@@ -57,8 +43,8 @@
 
 // Accessors for the most recent frame.
 - (char*)decodedFrame;
-- (int)length;
-- (long long)timestamp;
+- (int)encodedLength;
+- (int)screenCharArrayLength;
 - (DVRFrameInfo)info;
 
 // Advance to next frame.
@@ -69,6 +55,7 @@
 
 // Called when frame index key i is freed.
 - (void)invalidateIndex:(long long)i;
+- (NSData *)metadataForLine:(int)line;
 
 @end
 

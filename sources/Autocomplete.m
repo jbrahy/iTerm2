@@ -1,17 +1,21 @@
 #include <wctype.h>
 #import "Autocomplete.h"
-#import "CommandHistory.h"
-#import "CommandHistoryEntry.h"
+#import "iTerm2SharedARC-Swift.h"
+#import "iTermAdvancedSettingsModel.h"
+#import "iTermApplicationDelegate.h"
+#import "iTermCommandHistoryEntryMO+Additions.h"
+#import "iTermController.h"
+#import "iTermShellHistoryController.h"
+#import "iTermTextExtractor.h"
 #import "LineBuffer.h"
-#import "PTYTextView.h"
+#import "NSArray+iTerm.h"
+#import "NSEvent+iTerm.h"
 #import "PasteboardHistory.h"
 #import "PopupModel.h"
+#import "PTYTextView.h"
 #import "SearchResult.h"
 #import "VT100Screen.h"
-#import "iTermApplicationDelegate.h"
-#import "iTermController.h"
-#import "iTermTextExtractor.h"
-#import "iTermAdvancedSettingsModel.h"
+#import "VT100Screen+Search.h"
 
 #define AcLog DLog
 
@@ -22,47 +26,40 @@ const int kMaxResultContextWords = 4;
 {
     // Table view that displays choices.
     IBOutlet NSTableView* table_;
-    
+
     // Word before cursor.
     NSMutableString* prefix_;
-    
+
     // Is there whitespace before the cursor? If so, strip whitespace from before candidates.
     BOOL whitespaceBeforeCursor_;
-    
+
     // Words before the word at the cursor.
     NSMutableArray* context_;
-    
-    // x,y coords where prefix occured.
+
+    // x,y coords where prefix occurred.
     int startX_;
     long long startY_;  // absolute coord
-    
-    // Context for searches while populating unfilteredModel.
-    FindContext *findContext_;
-    
-    // Timer for doing asynch seraches for prefix.
-    NSTimer* populateTimer_;
-    
+
     // Cursor location to begin next search.
     int x_;
     long long y_;  // absolute coord
-    
+
     // Number of matches found so far
     int matchCount_;
-    
+
     // Text from previous autocompletes that were followed by -[more];
     NSMutableString* moreText_;
-    
+
     // Previous state from calls to -[more] so that -[less] can go back in time.
     NSMutableArray* stack_;
-    
+
     // SearchResults from doing a find operation
     NSMutableArray* findResults_;
-    
+
     // Result of previous search
     BOOL more_;
-    
-    // Character set for word separators
-    NSCharacterSet *wordSeparatorCharacterSet_;
+
+    iTermSearchEngine *_searchEngine;
 }
 
 + (int)maxOptions
@@ -70,8 +67,7 @@ const int kMaxResultContextWords = 4;
     return [iTermAdvancedSettingsModel autocompleteMaxOptions];
 }
 
-- (id)init
-{
+- (instancetype)init {
     const int kMaxOptions = [AutocompleteView maxOptions];
     self = [super initWithWindowNibName:@"Autocomplete"
                                tablePtr:nil
@@ -79,12 +75,15 @@ const int kMaxResultContextWords = 4;
     if (!self) {
         return nil;
     }
+    [self window];
     [self setTableView:table_];
     prefix_ = [[NSMutableString alloc] init];
     context_ = [[NSMutableArray alloc] init];
     stack_ = [[NSMutableArray alloc] init];
     findResults_ = [[NSMutableArray alloc] init];
-    findContext_ = [[FindContext alloc] init];
+    _searchEngine = [[iTermSearchEngine alloc] initWithDataSource:nil syncDistributor:nil];
+    _searchEngine.automaticallySynchronize = NO;
+    _searchEngine.maxConsumeCount = 128;
     return self;
 }
 
@@ -95,98 +94,172 @@ const int kMaxResultContextWords = 4;
     [moreText_ release];
     [context_ release];
     [prefix_ release];
-    [populateTimer_ invalidate];
-    [populateTimer_ release];
-    [findContext_ release];
-    [wordSeparatorCharacterSet_ release];
+    [_searchEngine release];
     [super dealloc];
 }
 
-- (void)appendContextAtX:(int)x y:(int)y into:(NSMutableArray*)context maxWords:(int)maxWords
-{
+- (NSArray<NSString *> *)contextWordsStartingAt:(VT100GridCoord)startCoord
+                                       maxWords:(int)maxWords
+                                         screen:(VT100Screen *)screen {
+    NSMutableArray<NSString *> *context = [NSMutableArray array];
     const int kMaxIterations = maxWords * 2;
-    VT100Screen* screen = [[self delegate] popupVT100Screen];
-    NSCharacterSet* nonWhitespace = [[NSCharacterSet whitespaceCharacterSet] invertedSet];
+    VT100GridCoord coord = startCoord;
 
     iTermTextExtractor *textExtractor = [self textExtractor];
     for (int i = 0; i < kMaxIterations && [context count] < maxWords; ++i) {
         // Move back one position
-        --x;
-        if (x < 0) {
-            x += [screen width];
-            --y;
+        coord.x--;
+        if (coord.x < 0) {
+            coord.x += [screen width];
+            coord.y--;
         }
-        if (y < 0) {
+        if (coord.y < 0) {
             break;
         }
 
-        VT100GridWindowedRange range = [textExtractor rangeForWordAt:VT100GridCoordMake(x, y)];
-        NSString *s = [textExtractor contentInRange:range
-                                  attributeProvider:nil
-                                         nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
-                                                pad:NO
-                                 includeLastNewline:NO
-                             trimTrailingWhitespace:NO
-                                       cappedAtSize:-1
-                                  continuationChars:nil];
-        if ([s rangeOfCharacterFromSet:nonWhitespace].location != NSNotFound) {
+        VT100GridCoord start;
+        NSString *s = [self contextWordAt:coord
+                            textExtractor:textExtractor
+                                    start:&start];
+        if (s) {
             // Add only if not whitespace.
             AcLog(@"Add to context (%d/%d): %@", (int) [context count], (int) maxWords, s);
             [context addObject:s];
         }
-        x = range.coordRange.start.x;
+        coord = start;
     }
+    return context;
 }
 
-- (void)onOpen
-{
-    VT100GridWindowedRange range;
-    VT100Screen* screen = [[self delegate] popupVT100Screen];
+- (void)appendContextAtX:(int)x y:(int)y into:(NSMutableArray*)context maxWords:(int)maxWords {
+    [context addObjectsFromArray:[self contextWordsStartingAt:VT100GridCoordMake(x, y)
+                                                     maxWords:maxWords
+                                                       screen:[self.delegate popupVT100Screen]]];
+}
 
-    [wordSeparatorCharacterSet_ autorelease];
-    wordSeparatorCharacterSet_ = [[iTermTextExtractor wordSeparatorCharacterSet] retain];
-
-    int x = [screen cursorX]-2;
-    int y = [screen cursorY] + [screen numberOfLines] - [screen height] - 1;
-    screen_char_t* sct = [screen getLineAtIndex:y];
-    [context_ removeAllObjects];
-    NSString* charBeforeCursor = ScreenCharToStr(&sct[x]);
-    AcLog(@"Char before cursor is '%@'", charBeforeCursor);
-    whitespaceBeforeCursor_ = ([charBeforeCursor rangeOfCharacterFromSet:[NSCharacterSet whitespaceCharacterSet]].location != NSNotFound);
+- (NSString *)contextWordAt:(VT100GridCoord)coord
+              textExtractor:(iTermTextExtractor *)textExtractor
+                      start:(VT100GridCoord *)startPtr {
+    VT100GridWindowedRange range = [textExtractor rangeForWordAt:coord
+                                                   maximumLength:kReasonableMaximumWordLength];
+    *startPtr = range.coordRange.start;
     NSCharacterSet* nonWhitespace = [[NSCharacterSet whitespaceCharacterSet] invertedSet];
-    if (x < 0) {
-        [prefix_ setString:@""];
-    } else {
-        iTermTextExtractor *extractor = [self textExtractor];
-        range = [extractor rangeForWordAt:VT100GridCoordMake(x, y)];
-        NSString *s = [extractor contentInRange:range
+    NSString *s = [textExtractor contentInRange:range
                               attributeProvider:nil
                                      nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
                                             pad:NO
                              includeLastNewline:NO
                          trimTrailingWhitespace:NO
                                    cappedAtSize:-1
-                              continuationChars:nil];
-        int maxWords = kMaxQueryContextWords;
-        if ([s rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound) {
-            ++maxWords;
-        } else {
-            [prefix_ setString:s];
-        }
-        AcLog(@"Prefix is %@ starting at %d", s, range.coordRange.start.x);
-        startX_ = range.coordRange.start.x;
-        startY_ = range.coordRange.start.y + [screen scrollbackOverflow];
+                                   truncateTail:YES
+                              continuationChars:nil
+                                         coords:nil];
+    // Add only if not whitespace.
+    if ([s rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound) {
+        return nil;
+    }
+    return s;
+}
 
-        [self appendContextAtX:range.coordRange.start.x
-                             y:range.coordRange.start.y
-                          into:context_ maxWords:maxWords];
-        if (maxWords > kMaxQueryContextWords) {
-            if ([context_ count] > 0) {
-                [prefix_ setString:[context_ objectAtIndex:0]];
-                [context_ removeObjectAtIndex:0];
-            } else {
-                [prefix_ setString:@""];
-            }
+- (void)onOpen
+{
+    VT100Screen *screen = [[self delegate] popupVT100Screen];
+
+    [context_ removeAllObjects];
+
+    if (![self.delegate popupShouldTakePrefixFromScreen]) {
+        [self loadPrefixFromHost:screen];
+    } else {
+        [self loadPrefixFromScreen:screen];
+    }
+}
+
+- (VT100GridCoord)searchCoord:(VT100Screen *)screen {
+    const int x = MAX(0, [screen cursorX] - 2);
+    const int y = MAX(0, [screen cursorY] + [screen numberOfLines] - [screen height] - 1);
+    return VT100GridCoordMake(x, y);
+}
+
+- (BOOL)characterIsWhitespaceAt:(VT100GridCoord)coord in:(VT100Screen *)screen {
+    const screen_char_t *sct = [screen screenCharArrayForLine:coord.y].line;
+    NSString *charBeforeCursor = ScreenCharToStr(&sct[coord.x]);
+    AcLog(@"Char before cursor is '%@'", charBeforeCursor);
+    return ([charBeforeCursor rangeOfCharacterFromSet:[NSCharacterSet whitespaceCharacterSet]].location != NSNotFound);
+}
+
+- (void)loadPrefixFromHost:(VT100Screen *)screen {
+    const VT100GridCoordRange range =
+    VT100GridCoordRangeMake(screen.cursorX - 1,
+                            screen.cursorY - 1 + screen.numberOfScrollbackLines,
+                            screen.cursorX - 1,
+                            screen.cursorY - 1 + screen.numberOfScrollbackLines);
+
+    BOOL precededByWhitespace = NO;
+    NSArray<NSString *> *words = [self.delegate popupWordsBeforeInsertionPoint:kMaxQueryContextWords + 1];
+
+    NSString *prefix = words.firstObject ?: @"";
+    [self setPrefix:prefix
+precededByWhitespace:precededByWhitespace
+              range:VT100GridWindowedRangeMake(range, -1, -1)
+           overflow:screen.scrollbackOverflow
+       contextWords:words.count > 1 ? [words subarrayFromIndex:1] : @[]];
+}
+
+- (void)loadPrefixFromScreen:(VT100Screen *)screen {
+    const VT100GridCoord coord = [self searchCoord:screen];
+    const BOOL precededByWhitespace = [self characterIsWhitespaceAt:coord in:screen];
+
+    VT100GridWindowedRange range;
+    NSString *s = [[[self delegate] popupVT100Screen] wordEndingAt:coord range:&range];
+
+    const BOOL prefixIsWhitespaceOnly = [self wordIsAllWhitespace:s];
+    const int maxWords = [self numberOfContextWordsForWhitespaceOnlyPrefix:prefixIsWhitespaceOnly];
+
+    NSArray<NSString *> *context = [self contextWordsStartingAt:range.coordRange.start
+                                                       maxWords:maxWords
+                                                         screen:screen];
+
+    [self setPrefix:s
+precededByWhitespace:precededByWhitespace
+              range:range
+           overflow:screen.scrollbackOverflow
+       contextWords:context];
+}
+
+- (BOOL)wordIsAllWhitespace:(NSString *)s {
+    NSCharacterSet *nonWhitespace = [[NSCharacterSet whitespaceCharacterSet] invertedSet];
+    return [s rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound;
+}
+
+- (int)numberOfContextWordsForWhitespaceOnlyPrefix:(BOOL)prefixIsWhitespaceOnly {
+    int maxWords = kMaxQueryContextWords;
+    if (prefixIsWhitespaceOnly) {
+        return maxWords + 1;
+    }
+    return maxWords;
+}
+
+- (void)setPrefix:(NSString *)s
+precededByWhitespace:(BOOL)precededByWhitespace
+            range:(VT100GridWindowedRange)range
+         overflow:(int)overflow
+     contextWords:(NSArray<NSString *> *)contextWords {
+    whitespaceBeforeCursor_ = precededByWhitespace;
+    const BOOL prefixIsWhitespaceOnly = [self wordIsAllWhitespace:s];
+    if (!prefixIsWhitespaceOnly) {
+        [prefix_ setString:s];
+    }
+    AcLog(@"Prefix is %@ starting at %d", s, range.coordRange.start.x);
+    startX_ = range.coordRange.start.x;
+    startY_ = range.coordRange.start.y + overflow;
+
+    [context_ addObjectsFromArray:contextWords];
+    if (prefixIsWhitespaceOnly) {
+        if ([context_ count] > 0) {
+            [prefix_ setString:[context_ objectAtIndex:0]];
+            [context_ removeObjectAtIndex:0];
+        } else {
+            [prefix_ setString:@""];
         }
     }
 }
@@ -274,7 +347,7 @@ const int kMaxResultContextWords = 4;
     if (joiningPrefixLength == 0) {
         score /= 2;
     }
-    
+
     AcLog(@"Final score is %lf", score);
     return score;
 }
@@ -286,7 +359,7 @@ const int kMaxResultContextWords = 4;
     NSRange range = [value rangeOfString:prefix_ options:(NSCaseInsensitiveSearch)];
     if (range.location != NSNotFound) {
         if (range.location > 0) {
-            if (![wordSeparatorCharacterSet_ characterIsMember:[value characterAtIndex:range.location - 1]]) {
+            if (![[iTermTextExtractor wordSeparatorCharacterSet] characterIsMember:[value characterAtIndex:range.location - 1]]) {
                 return;
             }
         }
@@ -297,10 +370,10 @@ const int kMaxResultContextWords = 4;
         // TODO: This is kind of sketchy. We need to look at text before the prefix and lower the score if not much of the prefix was matched.
         double score = [self scoreResultNumber:[self _timestampToResultNumber:[entry timestamp]]
                                   queryContext:context_
-                                 resultContext:[NSArray arrayWithObjects:nil]
+                                 resultContext:@[]
                            joiningPrefixLength:[prefix_ length]
                                           word:word];
-        PopupEntry* e = [PopupEntry entryWithString:word 
+        PopupEntry* e = [PopupEntry entryWithString:word
                                               score:score];
         if (whitespaceBeforeCursor_) {
             [e setPrefix:[NSString stringWithFormat:@"%@ ", prefix_]];
@@ -319,10 +392,11 @@ const int kMaxResultContextWords = 4;
     }
 }
 
-- (void)refresh
-{
+- (void)refresh {
+    DLog(@"Begin refresh");
+    [self.delegate popupIsSearching:YES];
     [[self unfilteredModel] removeAllObjects];
-    findContext_.substring = nil;
+    [_searchEngine cancel];
     VT100Screen* screen = [[self delegate] popupVT100Screen];
 
     x_ = startX_;
@@ -334,30 +408,41 @@ const int kMaxResultContextWords = 4;
     matchCount_ = 0;
     [findResults_ removeAllObjects];
     more_ = YES;
-    [screen setFindString:prefix_
-         forwardDirection:NO
-             ignoringCase:YES
-                    regex:NO
-              startingAtX:x_
-              startingAtY:y_
-               withOffset:1
-                inContext:findContext_
-          multipleResults:YES];
+    _searchEngine.dataSource = screen;
+
+    iTermSearchRequest *request = [[[iTermSearchRequest alloc] initWithQuery:prefix_
+                                                                        mode:iTermFindModeCaseInsensitiveSubstring
+                                                                  startCoord:VT100GridCoordMake(x_, y_)
+                                                                      offset:1
+                                                                     options:FindMultipleResults | FindOptBackwards
+                                                             forceMainScreen:NO
+                                                               startPosition:nil] autorelease];
+    // Limit the queue size to avoid hanging the main thread while pulling a huge number of results
+    // off the queue. Lots of search results aren't very useful for us anyway.
+    [request setMaxQueueSize:128];
+    [_searchEngine search:request];
 
     [self _doPopulateMore];
+    DLog(@"End refresh");
 }
 
-- (void)onClose
-{
+- (void)onClose {
+    [self.delegate popupIsSearching:NO];
     [stack_ removeAllObjects];
     [moreText_ release];
     moreText_ = nil;
 
-    if (populateTimer_) {
-        [populateTimer_ invalidate];
-        populateTimer_ = nil;
+    if (_searchEngine.timer) {
+        [_searchEngine.timer invalidate];
+        _searchEngine.timer = nil;
     }
     [super onClose];
+}
+
+- (NSString *)insertableString {
+    PopupEntry* e = [[self model] objectAtIndex:[self convertIndex:[table_ selectedRow]]];
+    NSString *result = moreText_ ?: @"";
+    return [result stringByAppendingString:e.mainValue];
 }
 
 - (void)rowSelected:(id)sender
@@ -366,12 +451,18 @@ const int kMaxResultContextWords = 4;
         PopupEntry* e = [[self model] objectAtIndex:[self convertIndex:[table_ selectedRow]]];
         [stack_ removeAllObjects];
         if (moreText_) {
-            [[self delegate] popupInsertText:moreText_];
+            [[self delegate] popupInsertText:moreText_ popup:self];
             [moreText_ release];
             moreText_ = nil;
         }
-        [[self delegate] popupInsertText:[e mainValue]];
+        [[self delegate] popupInsertText:[e mainValue] popup:self];
         [super rowSelected:sender];
+    }
+}
+
+- (void)previewCurrentRow {
+    if ([table_ selectedRow] >= 0) {
+        [self.delegate popupPreview:self.insertableString];
     }
 }
 
@@ -381,8 +472,8 @@ const int kMaxResultContextWords = 4;
     if ([keystr length] == 1) {
         unichar c = [keystr characterAtIndex:0];
         AcLog(@"c=%d", (int)c);
-        unsigned int modflag = [event modifierFlags];
-        if ((modflag & NSShiftKeyMask) && c == 25) {
+        unsigned int modflag = [event it_modifierFlags];
+        if ((modflag & NSEventModifierFlagShift) && c == 25) {
             // backtab
             [self less];
             return;
@@ -451,15 +542,16 @@ const int kMaxResultContextWords = 4;
 
 - (void)_populateMore:(id)sender
 {
-    if (populateTimer_ == nil) {
+    if (_searchEngine.timer == nil) {
         return;
     }
-    populateTimer_ = nil;
+    _searchEngine.timer = nil;
     [self _doPopulateMore];
 }
 
 - (void)_doPopulateMore
 {
+    DLog(@"Begin _doPopulateMore");
     VT100Screen* screen = [[self delegate] popupVT100Screen];
 
     struct timeval begintime;
@@ -467,199 +559,215 @@ const int kMaxResultContextWords = 4;
     NSCharacterSet* nonWhitespace = [[NSCharacterSet whitespaceCharacterSet] invertedSet];
 
     iTermTextExtractor *extractor = [self textExtractor];
-    do {
-        int startX;
-        int startY;
-        int endX;
-        int endY;
 
-        findContext_.hasWrapped = YES;
-        AcLog(@"Continue search...");
-        
-        NSDate* cs = [NSDate date];
-        if ([findResults_ count] == 0) {
-            assert(more_);
-            AcLog(@"Do another search");
-            more_ = [screen continueFindAllResults:findResults_
-                                            inContext:findContext_];
+    int startX;
+    int startY;
+    int endX;
+    int endY;
+
+    AcLog(@"Continue search...");
+
+    if ([findResults_ count] == 0) {
+        assert(more_);
+        AcLog(@"Do another search");
+        NSRange ignore;
+        more_ = [_searchEngine continueFindAllResults:findResults_
+                                             rangeOut:&ignore
+                                         absLineRange:NSMakeRange(0, 0)
+                                        rangeSearched:NULL];
+    }
+    AcLog(@"This iteration found %d results", (int) [findResults_ count]);
+    int n = 0;
+    DLog(@"Processing %@ results", @(findResults_.count));
+    while ([findResults_ count] > 0) {
+        ++n;
+        SearchResult* result = [findResults_ objectAtIndex:0];
+        if (result.isExternal) {
+            continue;
         }
-        AcLog(@"This iteration found %d results in %lf sec", (int) [findResults_ count], [[NSDate date] timeIntervalSinceDate:cs]);
-        NSDate* ps = [NSDate date];
-        int n = 0;
-        while ([findResults_ count] > 0 && [[NSDate date] timeIntervalSinceDate:cs] < 0.15) {
-            ++n;
-            SearchResult* result = [findResults_ objectAtIndex:0];
+        startX = result.internalStartX;
+        startY = result.internalAbsStartY - [screen totalScrollbackOverflow];
+        endX = result.internalEndX;
+        endY = result.internalAbsEndY - [screen totalScrollbackOverflow];
 
-            startX = result->startX;
-            startY = result->absStartY - [screen totalScrollbackOverflow];
-            endX = result->endX;
-            endY = result->absEndY - [screen totalScrollbackOverflow];
+        [findResults_ removeObjectAtIndex:0];
 
-            [findResults_ removeObjectAtIndex:0];
-
-            AcLog(@"Found match at %d-%d, line %d", startX, endX, startY);
-            VT100GridWindowedRange range;
-            // Get the word that includes the match.
-            range = [extractor rangeForWordAt:VT100GridCoordMake(startX, startY)];
-            NSString *immutableWord = [extractor contentInRange:range
-                                              attributeProvider:nil
-                                                     nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
-                                                            pad:NO
-                                             includeLastNewline:NO
-                                         trimTrailingWhitespace:NO
-                                                   cappedAtSize:-1
-                                              continuationChars:nil];
-            NSMutableString* firstWord = [NSMutableString stringWithString:immutableWord];
-            while ([firstWord length] < [prefix_ length]) {
-                range = [extractor rangeForWordAt:range.coordRange.end];
-                NSString* part = [extractor contentInRange:range
-                                         attributeProvider:nil
-                                                nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
-                                                       pad:NO
-                                        includeLastNewline:NO
-                                    trimTrailingWhitespace:NO
-                                              cappedAtSize:-1
-                                         continuationChars:nil];
-                if ([part length] == 0) {
-                    break;
-                }
-                [firstWord appendString:part];
+        AcLog(@"Found match at %d-%d, line %d", startX, endX, startY);
+        VT100GridWindowedRange range;
+        // Get the word that includes the match.
+        range = [extractor rangeForWordAt:VT100GridCoordMake(startX, startY)
+                            maximumLength:kReasonableMaximumWordLength];
+        NSString *immutableWord = [extractor contentInRange:range
+                                          attributeProvider:nil
+                                                 nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
+                                                        pad:NO
+                                         includeLastNewline:NO
+                                     trimTrailingWhitespace:NO
+                                               cappedAtSize:-1
+                                               truncateTail:YES
+                                          continuationChars:nil
+                                                     coords:nil];
+        NSMutableString* firstWord = [NSMutableString stringWithString:immutableWord];
+        while ([firstWord length] < [prefix_ length]) {
+            range = [extractor rangeForWordAt:range.coordRange.end
+                                maximumLength:kReasonableMaximumWordLength];
+            NSString* part = [extractor contentInRange:range
+                                     attributeProvider:nil
+                                            nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
+                                                   pad:NO
+                                    includeLastNewline:NO
+                                trimTrailingWhitespace:NO
+                                          cappedAtSize:-1
+                                          truncateTail:YES
+                                     continuationChars:nil
+                                                coords:nil];
+            if ([part length] == 0) {
+                break;
             }
-            NSString* word = firstWord;
-            AcLog(@"Matching word is %@", word);
-            NSRange wordRange = [word rangeOfString:prefix_ options:(NSCaseInsensitiveSearch|NSAnchoredSearch)];
-            if (wordRange.location == 0) {
-                // Result has prefix_ as prefix.
-                // Set fullMatch to true if the word we found is equal to prefix, or false if word just has prefix as its prefix.
-                BOOL fullMatch = (wordRange.length == [word length]);
+            [firstWord appendString:part];
+        }
+        NSString* word = firstWord;
+        AcLog(@"Matching word is %@", word);
+        NSRange wordRange = [word rangeOfString:prefix_ options:(NSCaseInsensitiveSearch|NSAnchoredSearch)];
+        if (wordRange.location == 0) {
+            // Result has prefix_ as prefix.
+            // Set fullMatch to true if the word we found is equal to prefix, or false if word just has prefix as its prefix.
+            BOOL fullMatch = (wordRange.length == [word length]);
 
-                // Grab the context before the match.
-                NSMutableArray* resultContext = [NSMutableArray arrayWithCapacity:kMaxResultContextWords];
-                AcLog(@"Word before what we want is in x=[%d to %d]", startX, endX);
-                [self appendContextAtX:startX y:(int)startY into:resultContext maxWords:kMaxResultContextWords];
+            // Grab the context before the match.
+            NSMutableArray* resultContext = [NSMutableArray arrayWithCapacity:kMaxResultContextWords];
+            AcLog(@"Word before what we want is in x=[%d to %d]", startX, endX);
+            [self appendContextAtX:startX y:(int)startY into:resultContext maxWords:kMaxResultContextWords];
 
-                if (fullMatch) {
-                    // Grab the word after the match (presumably containing non-word characters)
-                    ++endX;
-                    if (endX >= [screen width]) {
-                        endX -= [screen width];
-                        ++endY;
-                    }
-
-                    range = [extractor rangeForWordAt:VT100GridCoordMake(endX, endY)];
-                    word = [extractor contentInRange:range
-                                   attributeProvider:nil
-                                          nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
-                                                 pad:NO
-                                  includeLastNewline:NO
-                              trimTrailingWhitespace:NO
-                                        cappedAtSize:-1
-                                   continuationChars:nil];
-                    AcLog(@"First candidate is at %@", VT100GridWindowedRangeDescription(range));
-                    if ([word rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound) {
-                        // word after match is all whitespace. Grab the next word.
-                        if (range.coordRange.end.x == [screen width]) {
-                            range.coordRange.end.x = 0;
-                            ++range.coordRange.end.y;
-                        }
-                        if (range.coordRange.end.y < [screen numberOfLines]) {
-                            range = [extractor rangeForWordAt:range.coordRange.end];
-                            word = [extractor contentInRange:range
-                                           attributeProvider:nil
-                                                  nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
-                                                         pad:NO
-                                          includeLastNewline:NO
-                                      trimTrailingWhitespace:NO
-                                                cappedAtSize:-1
-                                           continuationChars:nil];
-                            if (!whitespaceBeforeCursor_) {
-                                // Prepend a space if one is needed
-                                word = [NSString stringWithFormat:@" %@", word];
-                            }
-                            AcLog(@"Replacement candidate is at %@: '%@'",
-                                  VT100GridWindowedRangeDescription(range), word);
-                        } else {
-                            AcLog(@"Hit end of screen.");
-                        }
-                    }
-                } else if (!whitespaceBeforeCursor_) {
-                    // Get suffix of word after match. If there's whitespace before the cursor then only
-                    // full matches are interesting.
-                    word = [word substringWithRange:NSMakeRange(wordRange.length, [word length] - wordRange.length)];
-                } else {
-                    // Not a full match and there is whitespace before the cursor.
-                    word = @"";
+            if (fullMatch) {
+                // Grab the word after the match (presumably containing non-word characters)
+                ++endX;
+                if (endX >= [screen width]) {
+                    endX -= [screen width];
+                    ++endY;
                 }
 
-                if ([word rangeOfCharacterFromSet:nonWhitespace].location != NSNotFound) {
-                    // Found a non-whitespace word after the match.
-                    AcLog(@"Candidate suffix is '%@'", word);
-                    int joiningPrefixLength;
-                    if (fullMatch) {
-                        joiningPrefixLength = 0;
-                    } else {
-                        joiningPrefixLength = [prefix_ length];
+                range = [extractor rangeForWordAt:VT100GridCoordMake(endX, endY)
+                                    maximumLength:kReasonableMaximumWordLength];
+                word = [extractor contentInRange:range
+                               attributeProvider:nil
+                                      nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
+                                             pad:NO
+                              includeLastNewline:NO
+                          trimTrailingWhitespace:NO
+                                    cappedAtSize:-1
+                                    truncateTail:YES
+                               continuationChars:nil
+                                          coords:nil];
+                AcLog(@"First candidate is at %@", VT100GridWindowedRangeDescription(range));
+                if ([word rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound) {
+                    // word after match is all whitespace. Grab the next word.
+                    if (range.coordRange.end.x == [screen width]) {
+                        range.coordRange.end.x = 0;
+                        ++range.coordRange.end.y;
                     }
-                    PopupEntry* e = [PopupEntry entryWithString:word score:[self scoreResultNumber:matchCount_++
-                                                                                      queryContext:context_
-                                                                                     resultContext:resultContext
-                                                                               joiningPrefixLength:joiningPrefixLength
-                                                                                              word:word]];
-                    if (whitespaceBeforeCursor_) {
-                        [e setPrefix:[NSString stringWithFormat:@"%@ ", prefix_]];
+                    if (range.coordRange.end.y < [screen numberOfLines]) {
+                        range = [extractor rangeForWordAt:range.coordRange.end
+                                            maximumLength:kReasonableMaximumWordLength];
+                        word = [extractor contentInRange:range
+                                       attributeProvider:nil
+                                              nullPolicy:kiTermTextExtractorNullPolicyFromStartToFirst
+                                                     pad:NO
+                                      includeLastNewline:NO
+                                  trimTrailingWhitespace:NO
+                                            cappedAtSize:-1
+                                            truncateTail:YES
+                                       continuationChars:nil
+                                                  coords:nil];
+                        if (!whitespaceBeforeCursor_) {
+                            // Prepend a space if one is needed
+                            word = [NSString stringWithFormat:@" %@", word];
+                        }
+                        AcLog(@"Replacement candidate is at %@: '%@'",
+                              VT100GridWindowedRangeDescription(range), word);
                     } else {
-                        [e setPrefix:prefix_];
+                        AcLog(@"Hit end of screen.");
                     }
-                    [[self unfilteredModel] addHit:e];
-                } else {
-                    AcLog(@"No candidate here.");
                 }
-                x_ = startX;
-                y_ = startY + [screen scrollbackOverflow];
-                AcLog(@"Update x,y to %d,%d", (int) x_, (int) y_);
+            } else if (!whitespaceBeforeCursor_) {
+                // Get suffix of word after match. If there's whitespace before the cursor then only
+                // full matches are interesting.
+                word = [word substringWithRange:NSMakeRange(wordRange.length, [word length] - wordRange.length)];
             } else {
-                // Match started in the middle of a word.
-                AcLog(@"Search found %@ which doesn't start the same as our search term %@", word, prefix_);
-                x_ = startX;
-                y_ = startY + [screen scrollbackOverflow];
+                // Not a full match and there is whitespace before the cursor.
+                word = @"";
             }
-        }
-        AcLog(@"This iteration processed %d results in %lf sec", n, [[NSDate date] timeIntervalSinceDate:ps]);
 
-        if (!more_ && [findResults_ count] == 0) {
-            AcLog(@"no more and no unprocessed results");
-            if (populateTimer_) {
-               [populateTimer_ invalidate];
-               populateTimer_ = nil;
+            if ([word rangeOfCharacterFromSet:nonWhitespace].location != NSNotFound) {
+                // Found a non-whitespace word after the match.
+                AcLog(@"Candidate suffix is '%@'", word);
+                int joiningPrefixLength;
+                if (fullMatch) {
+                    joiningPrefixLength = 0;
+                } else {
+                    joiningPrefixLength = [prefix_ length];
+                }
+                PopupEntry* e = [PopupEntry entryWithString:word score:[self scoreResultNumber:matchCount_++
+                                                                                  queryContext:context_
+                                                                                 resultContext:resultContext
+                                                                           joiningPrefixLength:joiningPrefixLength
+                                                                                          word:word]];
+                if (whitespaceBeforeCursor_) {
+                    [e setPrefix:[NSString stringWithFormat:@"%@ ", prefix_]];
+                } else {
+                    [e setPrefix:prefix_];
+                }
+                [[self unfilteredModel] addHit:e];
+            } else {
+                AcLog(@"No candidate here.");
             }
-            break;
+            x_ = startX;
+            y_ = startY + [screen scrollbackOverflow];
+            AcLog(@"Update x,y to %d,%d", (int) x_, (int) y_);
+        } else {
+            // Match started in the middle of a word.
+            AcLog(@"Search found %@ which doesn't start the same as our search term %@", word, prefix_);
+            x_ = startX;
+            y_ = startY + [screen scrollbackOverflow];
         }
+    }
+    AcLog(@"This iteration processed %d results", n);
 
-        // Don't spend more than 150ms outside of event loop.
-        struct timeval endtime;
-        gettimeofday(&endtime, NULL);
-        int ms_diff = (endtime.tv_sec - begintime.tv_sec) * 1000 +
-            (endtime.tv_usec - begintime.tv_usec) / 1000;
-        AcLog(@"ms_diff=%d", ms_diff);
-        if (ms_diff > 150) {
-            // Out of time. Reschedule and try again.
-            AcLog(@"Schedule timer");
-            populateTimer_ = [NSTimer scheduledTimerWithTimeInterval:0.01
-                                                              target:self
-                                                            selector:@selector(_populateMore:)
-                                                            userInfo:nil
-                                                             repeats:NO];
-            break;
+    if (!more_ && [findResults_ count] == 0) {
+        AcLog(@"no more and no unprocessed results");
+        if (_searchEngine.timer) {
+            [_searchEngine.timer invalidate];
+            _searchEngine.timer = nil;
         }
-    } while (more_ || [findResults_ count] > 0);
-    AcLog(@"While loop exited. Nothing more to do.");
+    } else {
+        // Reschedule and try again.
+        AcLog(@"Schedule timer");
+        _searchEngine.timer = [NSTimer scheduledTimerWithTimeInterval:0.01
+                                                               target:self
+                                                             selector:@selector(_populateMore:)
+                                                             userInfo:nil
+                                                              repeats:NO];
+    }
+
+    AcLog(@"Nothing more to do.");
     [self reloadData:YES];
+    if (!_searchEngine.timer) {
+        if (self.unfilteredModel.count == 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self closePopupWindow];
+            });
+        } else {
+            [self.delegate popupIsSearching:NO];
+        }
+    }
 }
 
-- (void)addCommandEntries:(NSArray *)entries context:(NSString *)context {
+- (void)addCommandEntries:(NSArray<iTermCommandHistoryEntryMO *> *)entries
+                  context:(NSString *)context {
+    DLog(@"Added %@ entries", @(entries.count));
     int i = 0;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    for (CommandHistoryEntry *entry in entries) {
+    for (iTermCommandHistoryEntryMO *entry in entries) {
         if (![entry.command hasPrefix:context]) {
             continue;
         }
@@ -677,14 +785,14 @@ const int kMaxResultContextWords = 4;
                                  resultContext:context_  // Maximize similarity because the whole prompt is in our favor
                            joiningPrefixLength:[prefix_ length]
                                           word:command];
-        
+
         // Boost the score for more uses of the command
-        score *= sqrt(entry.uses);
-        
+        score *= sqrt(entry.numberOfUses.integerValue);
+
         // Divide the score by sqrt(the number of days since last use).
-        NSTimeInterval timeSinceLastUse = now - entry.lastUsed;
+        NSTimeInterval timeSinceLastUse = now - entry.timeOfLastUse.doubleValue;
         score /= MAX(1, sqrt(timeSinceLastUse / (24 * 60 * 60.0)));
-        
+
         score = MIN(10, score);  // Limit score of commands so really relevant context has a chance.
         PopupEntry* e = [PopupEntry entryWithString:command
                                               score:score];

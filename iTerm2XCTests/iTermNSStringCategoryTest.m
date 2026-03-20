@@ -1,4 +1,6 @@
 #import <XCTest/XCTest.h>
+
+#import "iTermTuple.h"
 #import "NSStringITerm.h"
 
 @interface NSStringCategoryTest : XCTestCase
@@ -142,7 +144,7 @@
     [self assertString:@"\"foo bar\"" parsesAsShellCommandTo:@[ @"foo bar" ]];
     [self assertString:@"   \"foo bar\"   " parsesAsShellCommandTo:@[ @"foo bar" ]];
     [self assertString:@"   \"foo  bar\"   " parsesAsShellCommandTo:@[ @"foo  bar" ]];
-    [self assertString:@"   \"foo\\ bar\"   " parsesAsShellCommandTo:@[ @"foo bar" ]];
+    [self assertString:@"   \"foo\\ bar\"   " parsesAsShellCommandTo:@[ @"foo\\ bar" ]];
     [self assertString:@"   \"foo bar" parsesAsShellCommandTo:@[ @"foo bar" ]];
     [self assertString:@"\\\"foo bar\\\"" parsesAsShellCommandTo:@[ @"\"foo", @"bar\"" ]];
 
@@ -151,6 +153,14 @@
     [self assertString:@"a~" parsesAsShellCommandTo:@[ @"a~" ]];
     [self assertString:@"\"~\"" parsesAsShellCommandTo:@[ @"~" ]];
     [self assertString:@"\\~" parsesAsShellCommandTo:@[ @"~" ]];
+}
+
+- (void)testStringByTrimmingCharset {
+    XCTAssertEqualObjects([@"abc" stringByTrimmingTrailingCharactersFromCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"a"]], @"abc");
+    XCTAssertEqualObjects([@"abc" stringByTrimmingTrailingCharactersFromCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"c"]], @"ab");
+    XCTAssertEqualObjects([@"abc" stringByTrimmingTrailingCharactersFromCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"x"]], @"abc");
+    XCTAssertEqualObjects([@"abc" stringByTrimmingTrailingCharactersFromCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"bc"]], @"a");
+    XCTAssertEqualObjects([@"abc" stringByTrimmingTrailingCharactersFromCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"abc"]], @"");
 }
 
 - (void)testStringByTrimmingTrailingWhitespace {
@@ -190,44 +200,390 @@
     }
 }
 
+- (void)testStringByRemovingEnclosingBrackets {
+  XCTAssert([@"abc" isEqualToString:[@"abc" stringByRemovingEnclosingBrackets]]);
+
+  XCTAssert([@"abc" isEqualToString:[@"(abc)" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"abc" isEqualToString:[@"<abc>" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"abc" isEqualToString:[@"[abc]" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"abc" isEqualToString:[@"{abc}" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"abc" isEqualToString:[@"'abc'" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"abc" isEqualToString:[@"\"abc\"" stringByRemovingEnclosingBrackets]]);
+
+  XCTAssert([@"(abc(" isEqualToString:[@"(abc(" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"<abc<" isEqualToString:[@"<abc<" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"[abc[" isEqualToString:[@"[abc[" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"{abc{" isEqualToString:[@"{abc{" stringByRemovingEnclosingBrackets]]);
+
+  XCTAssert([@"a" isEqualToString:[@"a" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"a" isEqualToString:[@"(a)" stringByRemovingEnclosingBrackets]]);
+
+  XCTAssert([@"" isEqualToString:[@"" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"" isEqualToString:[@"()" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"" isEqualToString:[@"([])" stringByRemovingEnclosingBrackets]]);
+
+  XCTAssert([@"abc" isEqualToString:[@"<[abc]>" stringByRemovingEnclosingBrackets]]);
+  XCTAssert([@"<[abc>]" isEqualToString:[@"<[abc>]" stringByRemovingEnclosingBrackets]]);
+}
+
 - (void)testStringMatchesCaseInsensitiveGlobPattern {
   // Empty string tests
-  XCTAssertTrue([@"" stringMatchesCaseInsensitiveGlobPattern:@""]);
-  XCTAssertFalse([@"" stringMatchesCaseInsensitiveGlobPattern:@"abc"]);
+  XCTAssertTrue([@"" stringMatchesGlobPattern:@"" caseSensitive:NO]);
+  XCTAssertFalse([@"" stringMatchesGlobPattern:@"abc" caseSensitive:NO]);
 
   // Basic tests that should pass
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"abc"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a*c"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a*"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*c"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*bc"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*b*"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"**c"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a*b*c"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*a*b*c"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a*b*c*"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*a*b*c*"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"***a****b****c****"]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"abc" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"a*c" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"a*" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"*c" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"*bc" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"*b*" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"**c" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"a*b*c" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"*a*b*c" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"a*b*c*" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"*a*b*c*" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"***a****b****c****" caseSensitive:NO]);
 
   // Basic tests that should fail
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@""]);
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a"]);
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"x"]);
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"a*b"]);
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"*b"]);
-  XCTAssertFalse([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"***a****b**x**c****"]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"" caseSensitive:NO]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"a" caseSensitive:NO]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"x" caseSensitive:NO]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"a*b" caseSensitive:NO]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"*b" caseSensitive:NO]);
+  XCTAssertFalse([@"abc" stringMatchesGlobPattern:@"***a****b**x**c****" caseSensitive:NO]);
 
   // Longer string tests
-  XCTAssertTrue([@"abcdefghi" stringMatchesCaseInsensitiveGlobPattern:@"a*d*g*i"]);
-  XCTAssertTrue([@"abcdefghi" stringMatchesCaseInsensitiveGlobPattern:@"a*d*g*"]);
-  XCTAssertFalse([@"abcdefghi" stringMatchesCaseInsensitiveGlobPattern:@"a*q*g*"]);
+  XCTAssertTrue([@"abcdefghi" stringMatchesGlobPattern:@"a*d*g*i" caseSensitive:NO]);
+  XCTAssertTrue([@"abcdefghi" stringMatchesGlobPattern:@"a*d*g*" caseSensitive:NO]);
+  XCTAssertFalse([@"abcdefghi" stringMatchesGlobPattern:@"a*q*g*" caseSensitive:NO]);
 
   // Case insensitivity tests
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"ABC"]);
-  XCTAssertTrue([@"abc" stringMatchesCaseInsensitiveGlobPattern:@"A*C"]);
-  XCTAssertTrue([@"ABC" stringMatchesCaseInsensitiveGlobPattern:@"abc"]);
-  XCTAssertTrue([@"ABC" stringMatchesCaseInsensitiveGlobPattern:@"a*c"]);
-  XCTAssertFalse([@"ABC" stringMatchesCaseInsensitiveGlobPattern:@"a*x"]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"ABC" caseSensitive:NO]);
+  XCTAssertTrue([@"abc" stringMatchesGlobPattern:@"A*C" caseSensitive:NO]);
+  XCTAssertTrue([@"ABC" stringMatchesGlobPattern:@"abc" caseSensitive:NO]);
+  XCTAssertTrue([@"ABC" stringMatchesGlobPattern:@"a*c" caseSensitive:NO]);
+  XCTAssertFalse([@"ABC" stringMatchesGlobPattern:@"a*x" caseSensitive:NO]);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_Basic {
+    NSString *s = @"foo bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashEscapesMidlineSpace {
+    NSString *s = @"foo\\ bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashEscapesLeadingTrailingSpace {
+    NSString *s = @"\\ foo bar\\ ";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @" foo", @"bar " ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashEscapesSingleQuote {
+    NSString *s = @"foo\\' bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo'", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashEscapesDoubleQuote {
+    NSString *s = @"foo\\\" bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\"", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashEscapesBackslash {
+    NSString *s = @"foo\\\\ bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\\", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_CustomEscapes {
+    NSString *s = @"foo \\1";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{ @'1': @"bar" }];
+    NSArray<NSString *> *expected = @[ @"foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_QuotedCustomEscapes {
+    NSString *s = @"foo \"\\1\"";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{ @'1': @"bar" }];
+    NSArray<NSString *> *expected = @[ @"foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_DoubleQuotesWithSpace {
+    NSString *s = @"foo\" \"bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_DoubleQuotesWithSingleQuote {
+    NSString *s = @"foo\"'\"bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo'bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_DoubleQuotesWithEscapedDoubleQuote {
+    NSString *s = @"foo\"\\\"\"bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_SingleQuotesWithEscapedLetter {
+    NSString *s = @"foo'\\q'bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\\qbar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_SingleQuotesWithSpace {
+    NSString *s = @"foo' 'bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_SingleQuotesWithDoubleQuote {
+    NSString *s = @"foo'\"'bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_SingleQuotesWithEscapedSingleQuote {
+    NSString *s = @"foo'\\''bar'";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\\bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_MismatchedDoubleQuotes {
+    NSString *s = @"foo\" bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_MismatchedSingleQuotes {
+    NSString *s = @"foo' bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_OrphanBackslash {
+    NSString *s = @"foo bar\\";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_ExpandTilde {
+    NSString *s = @"~/foo bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    XCTAssertEqual(actual.count, 2);
+    XCTAssertFalse([actual[0] hasPrefix:@"~"]);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_MidlineTilde {
+    NSString *s = @"fo~o bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"fo~o", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_EscapedTilde {
+    NSString *s = @"\\~/foo bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"~/foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_DoubleQuotedTilde {
+    NSString *s = @"\"~/foo\" bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"~/foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_SingleQuotedTilde {
+    NSString *s = @"'~/foo' bar";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"~/foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_TrimSpace {
+    NSString *s = @"  foo   bar  ";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo", @"bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testComponentsBySplittingStringWithQuotesAndBackslashEscaping_BackslashInQuotes {
+    NSString *s = @"\"foo\\ bar\" 'foo\\ bar'";
+    NSArray<NSString *> *actual = [s componentsBySplittingStringWithQuotesAndBackslashEscaping:@{}];
+    NSArray<NSString *> *expected = @[ @"foo\\ bar", @"foo\\ bar" ];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testDoubleDollarVariables_OneTrivialCapture {
+    NSString *s = @"blah $$FOO$$ blah";
+    NSSet *expected = [NSSet setWithArray:@[ @"$$FOO$$" ]];
+    NSSet *actual = [s doubleDollarVariables];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testDoubleDollarVariables_TwoCaptures {
+    NSString *s = @"blah $$FOO$$ blah $$BAR$$ baz";
+    NSSet *expected = [NSSet setWithArray:@[ @"$$FOO$$", @"$$BAR$$" ]];
+    NSSet *actual = [s doubleDollarVariables];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testDoubleDollarVariables_EscapedCaptures {
+    NSString *s = @"blah $$$$ blah $$$$ baz";
+    NSSet *expected = [NSSet setWithArray:@[ @"$$$$" ]];
+    NSSet *actual = [s doubleDollarVariables];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testDoubleDollarVariables_OneBigCapture {
+    NSString *s = @"$$ foo bar baz $$";
+    NSSet *expected = [NSSet setWithArray:@[ @"$$ foo bar baz $$" ]];
+    NSSet *actual = [s doubleDollarVariables];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testDoubleDollarVariables_Unterminated {
+    NSString *s = @"echo $$";
+    NSSet *expected = [NSSet setWithArray:@[ ]];
+    NSSet *actual = [s doubleDollarVariables];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_Literal {
+    NSString *s = @"xyz";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"xyz" andObject:@YES] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_LiteralAndExpression {
+    NSString *s = @"abc\\(def)ghi";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"abc" andObject:@YES],
+           [iTermTuple tupleWithObject:@"def" andObject:@NO],
+           [iTermTuple tupleWithObject:@"ghi" andObject:@YES]];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_LiteralWithEscapedCharacters {
+    NSString *s = @"a\\b\\\\";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"a\\b\\\\" andObject:@YES] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_ExpressionContainingStringWithParens {
+    NSString *s = @"\\(foo(\"bar(((\"))";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"foo(\"bar(((\")" andObject:@NO] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_ExpressionContainingNestedExpression {
+    NSString *s = @"\\(foo(\"bar\(inner(x,y))\"))";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"foo(\"bar\(inner(x,y))\")" andObject:@NO] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_ExpressionContainingNestedExpressionWithString {
+    NSString *s = @"\\(foo(\"bar\(inner(\"innerstring\",y))\"))";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"foo(\"bar\(inner(\"innerstring\",y))\")" andObject:@NO] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testEnumerateSwiftySubstrings_UnclosedExpression {
+    NSString *s = @"\\(foo(\"bar\(inner(\"innerstring\",y";
+    NSArray<iTermTuple<NSString *, NSNumber *> *> *expected =
+        @[ [iTermTuple tupleWithObject:@"foo(\"bar\(inner(\"innerstring\",y" andObject:@YES] ];
+    NSMutableArray<iTermTuple<NSString *, NSNumber *> *> *actual = [NSMutableArray array];
+    [s enumerateSwiftySubstrings:^(NSUInteger index, NSString *substring, BOOL isLiteral, BOOL *stop) {
+        [actual addObject:[iTermTuple tupleWithObject:substring andObject:@(isLiteral)]];
+    }];
+    XCTAssertEqualObjects(actual, expected);
+}
+
+- (void)testReplaceControlCharactersWithCaretLetter_Empty {
+    NSString *actual = [@"" stringByReplacingControlCharactersWithCaretLetter];
+    XCTAssertEqualObjects(actual, @"");
+}
+
+- (void)testReplaceControlCharactersWithCaretLetter_JustAControlCharacter {
+    NSString *actual = [[NSString stringWithFormat:@"%c", 1] stringByReplacingControlCharactersWithCaretLetter];
+    XCTAssertEqualObjects(actual, @"^A");
+}
+
+- (void)testReplaceControlCharactersWithCaretLetter_Backspace {
+    NSString *actual = [[NSString stringWithFormat:@"%c", 0x7f] stringByReplacingControlCharactersWithCaretLetter];
+    XCTAssertEqualObjects(actual, @"^?");
+}
+
+- (void)testReplaceControlCharactersWithCaretLetter_JustTwoControlCharacters {
+    NSString *actual = [[NSString stringWithFormat:@"%c%c", 1, 2] stringByReplacingControlCharactersWithCaretLetter];
+    XCTAssertEqualObjects(actual, @"^A^B");
+}
+
+- (void)testReplaceControlCharactersWithCaretLetter_MixOfRegularAndControlCharacters {
+    NSString *actual = [[NSString stringWithFormat:@"12%c34%c56", 1, 2] stringByReplacingControlCharactersWithCaretLetter];
+    XCTAssertEqualObjects(actual, @"12^A34^B56");
+}
+
+- (void)testEncodeNullString {
+    const unichar zero = 0;
+    NSString *actual = [[NSString stringWithCharacters:&zero length:1] jsonEncodedString];
+    XCTAssertEqualObjects(actual, @"\"\\u0000\"");
 }
 
 @end

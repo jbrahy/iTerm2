@@ -16,12 +16,15 @@ extern const double kFindCursorHoldTime;
 
 @end
 
+// This is the superclass for a class cluster.
 @interface iTermFindCursorView : NSView
 
 @property(nonatomic, assign) id<iTermFindCursorViewDelegate> delegate;
 @property(nonatomic, assign) NSPoint cursorPosition;
 @property(nonatomic, assign) BOOL autohide;
 @property(nonatomic, assign) BOOL stopping;
+
++ (instancetype)newFireworksViewWithFrame:(NSRect)frameRect;
 
 - (void)startTearDownTimer;
 - (void)stopTearDownTimer;
